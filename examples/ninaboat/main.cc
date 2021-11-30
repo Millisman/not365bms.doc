@@ -15,7 +15,7 @@
 protocol::NinaBoat proto; // device protocol class
 
 uint32_t g_lastActivity = 0;
-bool g_Debug = true;
+bool g_Debug = false;
 
 #define PIN_LED_SCK MAKEPIN(B, 5, OUT)
 
@@ -90,7 +90,7 @@ int main() {
     _delay_ms(100);
     led = 0;
     _delay_ms(900);
-    mcu::Watchdog::enable(WDTO_1S);
+    mcu::Watchdog::enable(WDTO_4S);
 
     proto.setDebug(g_Debug);
     proto.start();
@@ -118,7 +118,7 @@ int main() {
             sleep_enable();
             sei();
             // go to sleep if it's just timer2 that woke us up (unless we were idle for longer than 500ms)
-            do { sleep_cpu(); } while ( !g_wakeupFlag && g_timer2Overflows < 16 );
+            do { sleep_cpu(); } while ( !g_wakeupFlag && g_timer2Overflows < 160 );
             sleep_disable();
             // Disable Timer/Counter2 and add elapsed time to Arduinos 'timer0_millis'
             TCCR2B = 0;
