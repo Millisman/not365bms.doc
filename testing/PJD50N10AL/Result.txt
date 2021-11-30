@@ -1,0 +1,13 @@
+Test at 20A
+
+4pcs PJD50N10AL
+Total Ron = 11 mOhm
+Overheat!
+
+7pcs PJD50N10AL
+Total Ron = 6.4 mOhm
+max temp 80 C
+
+7pcs PJD50N10AL
++mod
+Total Ron = 5.5 mOhm
