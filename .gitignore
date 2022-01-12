@@ -32,3 +32,8 @@ obj
 *.exe
 *.out
 *.app
+
+#kdev4
+.kdev4
+.kdev4/*
+*.kdev4

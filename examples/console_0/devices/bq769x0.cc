@@ -25,150 +25,70 @@
 #include <limits.h>
 #include <stdint.h>
 #include <avr/pgmspace.h>
-// #define INT16_MAX 0x7fffL
-// #define INT16_MIN (-INT16_MAX - 1L)
+#include <stdint.h>
 
 namespace devices {
 
-// TODO move this
-const char *byte2char(int x)
-{
+const char *byte2char(int x) {
     static char b[9];
     b[0] = '\0';
-
     int z;
-    for (z = 128; z > 0; z >>= 1)
-    {
+    for (z = 128; z > 0; z >>= 1) {
         strcat(b, ((x & z) == z) ? "1" : "0");
     }
-
     return b;
 }
 
-// TODO move this
-uint8_t _crc8_ccitt_update (uint8_t inCrc, uint8_t inData)
-{
+uint8_t _crc8_ccitt_update (uint8_t inCrc, uint8_t inData) {
     uint8_t data = inCrc ^ inData;
-
-    for (uint8_t i = 0; i < 8; i++)
-    {
-        if ((data & 0x80) != 0)
-        {
+    for (uint8_t i = 0; i < 8; i++) {
+        if ((data & 0x80) != 0) {
             data <<= 1;
             data ^= 0x07;
-        }
-        else
-        {
+        } else {
             data <<= 1;
         }
     }
     return data;
 }
 
-// uint8_t batCycles_;
-// uint8_t chargedTimes_;
-// uint8_t errorCounter_[NUM_ERRORS];
-bq769x0::bq769x0(BqIC bqType, uint8_t bqI2CAddress, bool crc):
-    cout                    (mcu::Usart::get()),
-    m_Debug                 (false),
-    chargingEnabled_        (false),
-    dischargingEnabled_     (false),
-    crcEnabled_(crc),
-    alertInterruptFlag_     (true),
-    balanceCharging_        (false),
-    autoBalancingEnabled_   (false),
-    user_CHGOCD_ReleasedNow_(false),
-    I2CAddress_             (bqI2CAddress),
-    type_                   (bqType),
-    chargingDisabled_       (0),
-    dischargingDisabled_    (0),
-    shuntResistorValue_uOhm_(1000), // 1mOhm
-    thermistorBetaValue_    (3435), // typical value for Semitec 103AT-5 thermistor: 3435
-    OCV_                    (0), // Open Circuit Voltage of cell for SOC 100%, 95%, ..., 5%, 0%
-    numberOfCells_          (15), // number of cells allowed by IC (MAX)
-    connectedCells_         (0), // actual number of cells connected
-    idCellMaxVoltage_       (0),
-    idCellMinVoltage_       (0),
-    batVoltage_             (0), // mV
-    batVoltage_raw_         (0), // adc val
-    batCurrent_             (0), // mA
-    batCurrent_raw_         (0), // adc val
-    thermistors_            (0),
-    nominalVoltage_         (3600), // mV, nominal voltage of single cell in battery pack
-    fullVoltage_            (4200), // mV, full voltage of single cell in battery pack
-    nominalCapacity_        (0), // mAs, nominal capacity of battery pack, max. 580 Ah possible @ 3.7V
-    coulombCounter_         (0), // mAs (= milli Coulombs) for current integration
-    coulombCounter2_        (0), // mAs (= milli Coulombs) for tracking battery cycles
-    maxChargeCurrent_       (0), // Current limits (mA)
-    maxChargeCurrent_delay_ (8), // Current limits
-    maxDischargeCurrent_    (0), // Current limits (mA)
-    idleCurrentThreshold_   (30), // Current (mA)
-    minCellTempCharge_      (0), // Temperature limits (°C/10)
-    minCellTempDischarge_   (0), // Temperature limits (°C/10)
-    maxCellTempCharge_      (0), // Temperature limits (°C/10)
-    maxCellTempDischarge_   (0), // Temperature limits (°C/10)
-    maxCellVoltage_         (0), // Cell voltage limits (mV)
-    minCellVoltage_         (0), // Cell voltage limits (mV)
-    balancingMinCellVoltage_mV_(3400), // Cell voltage (mV)
-    balancingMaxVoltageDifference_mV_ (20), // Cell voltage (mV)
-    adcGain_                (0), // uV/LSB
-    adcOffset_              (0), // mV
-    adcPackOffset_          (0), // mV
-    adcCellsOffset_         (0), // mV
-    balancingStatus_        (0), // holds on/off status of balancing switches
-    balancingMinIdleTime_s_ (1800),
-    idleTimestamp_          (0),
-    charging_               (0),
-    chargeTimestamp_        (0),
-    fullVoltageCount_       (0),
-    user_CHGOCD_TriggerTimestamp_ (0),
-    user_CHGOCD_ReleaseTimestamp_ (0),
-    interruptTimestamp_     (0)
+bq769x0::bq769x0(bq769_conf &_conf, bq769_data &_data):
+    cout(mcu::Usart::get()),
+    conf(_conf),
+    data(_data)
 {
-    memset(errorTimestamps_,    0, sizeof(errorTimestamps_));
-    memset(temperatures_,       0, sizeof(temperatures_));
-    memset(cellVoltages_,       0, sizeof(cellVoltages_));
-    memset(cellVoltages_raw_,   0, sizeof(cellVoltages_raw_));
-    memset(cellIdMap_,          0, sizeof(cellIdMap_));
+    memset(&_data, 0, sizeof(_data));
+    data.alertInterruptFlag_ = true;
+}
 
-    if (type_ == BqIC::bq76920) {
-        numberOfCells_ = 5;
-        setThermistors(0b001);
-    } else if (type_ == BqIC::bq76930) {
-        numberOfCells_ = 10;
-        setThermistors(0b011);
-    } else {
-        setThermistors(0b111);
-    }
-
+void bq769x0::begin() {
+    // test communication
     while (true) {
-        // test communication
-        writeRegister(CC_CFG, 0x19);       // should be set to 0x19 according to datasheet
+        // should be set to 0x19 according to datasheet
+        writeRegister(CC_CFG, 0x19);
         if (readRegister(CC_CFG) == 0x19) break;
         cout << stream::Flags::PGM << PSTR("bq769x0 CFG error!\r\n");
         _delay_ms(125);
     }
-    
     // initial settings for bq769x0
     writeRegister(SYS_CTRL1, 0b00011000);  // switch external thermistor and ADC on
     writeRegister(SYS_CTRL2, 0b01000000);  // switch CC_EN on
-    
     // reset balance registers just in case
     writeRegister(CELLBAL1, 0x0);
     writeRegister(CELLBAL2, 0x0);
     writeRegister(CELLBAL3, 0x0);
-    
     // get ADC offset and gain
-    adcOffset_ = readRegister(ADCOFFSET);
-    adcGain_ = 365 + (
+    data.adcOffset_ = readRegister(ADCOFFSET);
+    data.adcGain_ = 365 + (
         ((readRegister(ADCGAIN1) & 0b00001100) << 1) |
-        ((readRegister(ADCGAIN2) & 0b11100000) >> 5)); // uV/LSB
-        
+        ((readRegister(ADCGAIN2) & 0b11100000) >> 5)
+    ); // uV/LSB
 }
+
 
 //-----------------------------------------------------------------------------
 
-void bq769x0::setDebug(bool debug) { m_Debug = debug; }
+// void bq769x0::setDebug(bool debug) { conf.m_Debug = debug; }
 
 //-----------------------------------------------------------------------------
 
@@ -190,79 +110,79 @@ void bq769x0::setDebug(bool debug) { m_Debug = debug; }
 
 uint8_t bq769x0::checkStatus() {
 
-    if (alertInterruptFlag_ || errorStatus_.regByte) {
+    if (data.alertInterruptFlag_ || errorStatus_.regByte) {
         regSYS_STAT_t sys_stat;
         sys_stat.regByte = readRegister(SYS_STAT);
 
         // first check, if only a new CC reading is available
         if (sys_stat.bits.CC_READY == 1) {
-            if(m_Debug) cout << stream::Flags::PGM << PSTR("Interrupt: CC ready\r\n");
+            if(conf.m_Debug) cout << '.'; // cout << stream::Flags::PGM << PSTR("Interrupt: CC ready\r\n");
             updateCurrent();  // automatically clears CC ready flag
         }
 
         // Serious error occured
         if (sys_stat.regByte & STAT_FLAGS) {
             if (!errorStatus_.bits.DEVICE_XREADY && sys_stat.bits.DEVICE_XREADY) { // XR error
-                chargingEnabled_ = dischargingEnabled_ = false;
-                chargingDisabled_ |= (1 << ERROR_XREADY);
-                dischargingDisabled_ |= (1 << ERROR_XREADY);
+                data.chargingEnabled_ = data.dischargingEnabled_ = false;
+                data.chargingDisabled_ |= (1 << ERROR_XREADY);
+                data.dischargingDisabled_ |= (1 << ERROR_XREADY);
                 errorCounter_[ERROR_XREADY]++;
-                errorTimestamps_[ERROR_XREADY] = mcu::Timer::millis();
-                if(m_Debug) cout << stream::Flags::PGM << PSTR("bq769x0 ERROR: XREADY\r\n");
+                data.errorTimestamps_[ERROR_XREADY] = mcu::Timer::millis();
+                if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("bq769x0 ERROR: XREADY\r\n");
             }
             if (!errorStatus_.bits.OVRD_ALERT && sys_stat.bits.OVRD_ALERT) { // Alert error
-                chargingEnabled_ = dischargingEnabled_ = false;
-                chargingDisabled_ |= (1 << ERROR_ALERT);
-                dischargingDisabled_ |= (1 << ERROR_ALERT);
+                data.chargingEnabled_ = data.dischargingEnabled_ = false;
+                data.chargingDisabled_ |= (1 << ERROR_ALERT);
+                data.dischargingDisabled_ |= (1 << ERROR_ALERT);
 
                 errorCounter_[ERROR_ALERT]++;
-                errorTimestamps_[ERROR_ALERT] = mcu::Timer::millis();
+                data.errorTimestamps_[ERROR_ALERT] = mcu::Timer::millis();
 
-                if(m_Debug) cout << stream::Flags::PGM << PSTR("bq769x0 ERROR: ALERT\r\n");
+                if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("bq769x0 ERROR: ALERT\r\n");
 
             }
             if (sys_stat.bits.UV) { // UV error
-                dischargingEnabled_ = false;
-                dischargingDisabled_ |= (1 << ERROR_UVP);
+                data.dischargingEnabled_ = false;
+                data.dischargingDisabled_ |= (1 << ERROR_UVP);
 
                 errorCounter_[ERROR_UVP]++;
-                errorTimestamps_[ERROR_UVP] = mcu::Timer::millis();
+                data.errorTimestamps_[ERROR_UVP] = mcu::Timer::millis();
 
-                if(m_Debug)
+                if(conf.m_Debug)
                     cout << stream::Flags::PGM << PSTR("bq769x0 ERROR: UVP\r\n");
 
             }
             if (sys_stat.bits.OV) { // OV error
-                chargingEnabled_ = false;
-                chargingDisabled_ |= (1 << ERROR_OVP);
+                data.chargingEnabled_ = false;
+                data.chargingDisabled_ |= (1 << ERROR_OVP);
 
                 errorCounter_[ERROR_OVP]++;
-                errorTimestamps_[ERROR_OVP] = mcu::Timer::millis();
+                data.errorTimestamps_[ERROR_OVP] = mcu::Timer::millis();
 
-                if(m_Debug)
+                if(conf.m_Debug)
                     cout << stream::Flags::PGM << PSTR("bq769x0 ERROR: OVP\r\n");
 
             }
             if (sys_stat.bits.SCD) { // SCD
-                dischargingEnabled_ = false;
-                dischargingDisabled_ |= (1 << ERROR_SCD);
+                data.dischargingEnabled_ = false;
+                data.dischargingDisabled_ |= (1 << ERROR_SCD);
 
                 errorCounter_[ERROR_SCD]++;
-                errorTimestamps_[ERROR_SCD] = mcu::Timer::millis();
+                data.errorTimestamps_[ERROR_SCD] = mcu::Timer::millis();
 
-                if(m_Debug)
+                if(conf.m_Debug)
                     cout << stream::Flags::PGM << PSTR("bq769x0 ERROR: SCD\r\n");
 
 
             }
             if (sys_stat.bits.OCD) { // OCD
-                dischargingEnabled_ = false;
-                dischargingDisabled_ |= (1 << ERROR_OCD);
+                data.dischargingEnabled_ = false;
+                data.dischargingDisabled_ |= (1 << ERROR_OCD);
 
                 errorCounter_[ERROR_OCD]++;
-                errorTimestamps_[ERROR_OCD] = mcu::Timer::millis();
+                data.errorTimestamps_[ERROR_OCD] = mcu::Timer::millis();
 
-                if(m_Debug)
+                if(conf.m_Debug)
                     cout << stream::Flags::PGM << PSTR("bq769x0 ERROR: OCD\r\n");
 
 
@@ -284,8 +204,8 @@ void bq769x0::clearErrors() {
     
     if(errorStatus_.bits.DEVICE_XREADY) {
         // datasheet recommendation: try to clear after waiting a few seconds
-        if((uint32_t)(mcu::Timer::millis() - errorTimestamps_[ERROR_XREADY]) > 3UL * 1000UL) {
-            if(m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear XREADY error\r\n");
+        if((uint32_t)(mcu::Timer::millis() - data.errorTimestamps_[ERROR_XREADY]) > 3UL * 1000UL) {
+            if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear XREADY error\r\n");
             writeRegister(SYS_STAT, STAT_DEVICE_XREADY);
             enableCharging(1 << ERROR_XREADY);
             enableDischarging(1 << ERROR_XREADY);
@@ -294,7 +214,7 @@ void bq769x0::clearErrors() {
     }
     
     if(errorStatus_.bits.OVRD_ALERT) {
-        if(m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear ALERT error\r\n");
+        if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear ALERT error\r\n");
         writeRegister(SYS_STAT, STAT_OVRD_ALERT);
         enableCharging(1 << ERROR_ALERT);
         enableDischarging(1 << ERROR_ALERT);
@@ -302,8 +222,8 @@ void bq769x0::clearErrors() {
     }
     
     if(errorStatus_.bits.UV) {
-        if(cellVoltages_[idCellMinVoltage_] > minCellVoltage_) {
-            if(m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear UVP error\r\n");
+        if(data.cellVoltages_[idCellMinVoltage_] > minCellVoltage_) {
+            if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear UVP error\r\n");
             writeRegister(SYS_STAT, STAT_UV);
             enableDischarging(1 << ERROR_UVP);
             errorStatus_.bits.UV = 0;
@@ -311,9 +231,9 @@ void bq769x0::clearErrors() {
     }
     
     if(errorStatus_.bits.OV) {
-        if(cellVoltages_[idCellMaxVoltage_] < maxCellVoltage_) {
+        if(data.cellVoltages_[idCellMaxVoltage_] < maxCellVoltage_) {
 
-            if(m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear OVP error\r\n");
+            if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear OVP error\r\n");
             writeRegister(SYS_STAT, STAT_OV);
             enableCharging(1 << ERROR_OVP);
             errorStatus_.bits.OV = 0;
@@ -322,8 +242,8 @@ void bq769x0::clearErrors() {
 
     if(errorStatus_.bits.SCD) {
         
-        if((uint32_t)(mcu::Timer::millis() - errorTimestamps_[ERROR_SCD]) > 10UL * 1000UL) {
-            if(m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear SCD error\r\n");
+        if((uint32_t)(mcu::Timer::millis() - data.errorTimestamps_[ERROR_SCD]) > 10UL * 1000UL) {
+            if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear SCD error\r\n");
             writeRegister(SYS_STAT, STAT_SCD);
             enableDischarging(1 << ERROR_SCD);
             errorStatus_.bits.SCD = 0;
@@ -332,8 +252,8 @@ void bq769x0::clearErrors() {
     
     if(errorStatus_.bits.OCD) {
 
-        if((uint32_t)(mcu::Timer::millis() - errorTimestamps_[ERROR_OCD]) > 10UL * 1000UL) {
-            if(m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear OCD error\r\n");
+        if((uint32_t)(mcu::Timer::millis() - data.errorTimestamps_[ERROR_OCD]) > 10UL * 1000UL) {
+            if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("Attempting to clear OCD error\r\n");
             writeRegister(SYS_STAT, STAT_OCD);
             enableDischarging(1 << ERROR_OCD);
             errorStatus_.bits.OCD = 0;
@@ -367,77 +287,77 @@ void bq769x0::shutdown() {
 //----------------------------------------------------------------------------
 
 bool bq769x0::enableCharging(uint16_t flag) {
-    chargingDisabled_ &= ~flag;
+    data.chargingDisabled_ &= ~flag;
 
-    if(!chargingEnabled_ && !chargingDisabled_) {
+    if(!data.chargingEnabled_ && !data.chargingDisabled_) {
         int sys_ctrl2;
         sys_ctrl2 = readRegister(SYS_CTRL2);
         writeRegister(SYS_CTRL2, sys_ctrl2 | 0b00000001);  // switch CHG on
-        chargingEnabled_ = true;
+        data.chargingEnabled_ = true;
 
-        if(m_Debug) cout << stream::Flags::PGM << PSTR("Enabling CHG FET\r\n");
+        if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("Enabling CHG FET\r\n");
 
         return true;
     }
-    else { return chargingEnabled_; }
+    else { return data.chargingEnabled_; }
 }
 
 //----------------------------------------------------------------------------
 
 void bq769x0::disableCharging(uint16_t flag) {
-    chargingDisabled_ |= flag;
+    data.chargingDisabled_ |= flag;
 
-    if(chargingEnabled_ && chargingDisabled_) {
+    if(data.chargingEnabled_ && data.chargingDisabled_) {
         int sys_ctrl2;
         sys_ctrl2 = readRegister(SYS_CTRL2);
         writeRegister(SYS_CTRL2, sys_ctrl2 & ~0b00000001);  // switch CHG off
-        chargingEnabled_ = false;
-        if(m_Debug) cout << stream::Flags::PGM << PSTR("Disabling CHG FET\r\n");
+        data.chargingEnabled_ = false;
+        if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("Disabling CHG FET\r\n");
     }
 }
 
 //----------------------------------------------------------------------------
 
 bool bq769x0::enableDischarging(uint16_t flag) {
-    dischargingDisabled_ &= ~flag;
+    data.dischargingDisabled_ &= ~flag;
 
-    if(!dischargingEnabled_ && !dischargingDisabled_) {
+    if(!data.dischargingEnabled_ && !data.dischargingDisabled_) {
         int sys_ctrl2;
         sys_ctrl2 = readRegister(SYS_CTRL2);
         writeRegister(SYS_CTRL2, sys_ctrl2 | 0b00000010);  // switch DSG on
-        dischargingEnabled_ = true;
-        if(m_Debug) cout << stream::Flags::PGM << PSTR("Enabling DISCHG FET\r\n");
+        data.dischargingEnabled_ = true;
+        if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("Enabling DISCHG FET\r\n");
         return true;
-    } else { return dischargingEnabled_; }
+    } else { return data.dischargingEnabled_; }
 }
 
 //----------------------------------------------------------------------------
 
 void bq769x0::disableDischarging(uint16_t flag) {
-    dischargingDisabled_ |= flag;
-    if(dischargingEnabled_ && dischargingDisabled_) {
+    data.dischargingDisabled_ |= flag;
+    if(data.dischargingEnabled_ && data.dischargingDisabled_) {
         int sys_ctrl2;
         sys_ctrl2 = readRegister(SYS_CTRL2);
         writeRegister(SYS_CTRL2, sys_ctrl2 & ~0b00000010);  // switch DSG off
-        dischargingEnabled_ = false;
-        if(m_Debug) cout << stream::Flags::PGM << PSTR("Disabling DISCHG FET\r\n");
+        data.dischargingEnabled_ = false;
+        if(conf.m_Debug) cout << stream::Flags::PGM << PSTR("Disabling DISCHG FET\r\n");
     }
 }
 
 //----------------------------------------------------------------------------
 
-void bq769x0::setAutoBalancing(const bool ab) { autoBalancingEnabled_ = ab; }
+// void bq769x0::setAutoBalancing(const bool ab) { conf.autoBalancingEnabled_ = ab; }
 
 //----------------------------------------------------------------------------
 
-void bq769x0::setBalancingThresholds(uint16_t idleTime_s,
-                                     uint16_t absVoltage_mV,
-                                     uint8_t voltageDifference_mV)
-{
-    balancingMinIdleTime_s_ = idleTime_s;
-    balancingMinCellVoltage_mV_ = absVoltage_mV;
-    balancingMaxVoltageDifference_mV_ = voltageDifference_mV;
-}
+// void bq769x0::setBalancingThresholds(uint16_t idleTime_s,
+//                                      uint16_t absVoltage_mV,
+//                                      uint8_t voltageDifference_mV)
+// {
+//     conf.balancingMinIdleTime_s_ = idleTime_s;
+//     conf.balancingMinCellVoltage_mV_ = absVoltage_mV;
+//     conf.balancingMaxVoltageDifference_mV_ = voltageDifference_mV;
+// }
 
 //----------------------------------------------------------------------------
 // sets balancing registers if balancing is allowed
@@ -445,7 +365,7 @@ void bq769x0::setBalancingThresholds(uint16_t idleTime_s,
 
 void bq769x0::updateBalancingSwitches(void) {
     int32_t idleSeconds = (mcu::Timer::millis() - idleTimestamp_) / 1000;
-    uint8_t numberOfSections = (numberOfCells_ + 4) / 5;
+    uint8_t numberOfSections = (NUMBER_OF_CELLS + 4) / 5;
 
     // check for millis() overflow
     if (idleSeconds < 0) {
@@ -454,13 +374,13 @@ void bq769x0::updateBalancingSwitches(void) {
     }
 
     // check if balancing allowed
-    if (autoBalancingEnabled_ && errorStatus_.regByte == 0 &&
-        ((balanceCharging_ && charging_ == 2) || idleSeconds >= balancingMinIdleTime_s_) &&
-        cellVoltages_[idCellMaxVoltage_] > balancingMinCellVoltage_mV_ &&
-        (cellVoltages_[idCellMaxVoltage_] - cellVoltages_[idCellMinVoltage_]) > balancingMaxVoltageDifference_mV_)
+    if (conf.autoBalancingEnabled_ && errorStatus_.regByte == 0 &&
+        ((conf.balanceCharging_ && charging_ == 2) || idleSeconds >= conf.balancingMinIdleTime_s_) &&
+        data.cellVoltages_[idCellMaxVoltage_] > conf.balancingMinCellVoltage_mV_ &&
+        (data.cellVoltages_[idCellMaxVoltage_] - data.cellVoltages_[idCellMinVoltage_]) > conf.balancingMaxVoltageDifference_mV_)
     {
         //Serial.println("Balancing enabled!");
-        balancingStatus_ = 0;  // current status will be set in following loop
+        data.balancingStatus_ = 0;  // current status will be set in following loop
 
         //regCELLBAL_t cellbal;
         uint16_t balancingFlags;
@@ -473,13 +393,13 @@ void bq769x0::updateBalancingSwitches(void) {
             uint8_t cellCounter = 0;
             for (uint8_t i = 0; i < 5; i++)
             {
-                if (cellVoltages_[section*5 + i] < 500)
+                if (data.cellVoltages_[section*5 + i] < 500)
                     continue;
 
-                if ((cellVoltages_[section*5 + i] - cellVoltages_[idCellMinVoltage_]) > balancingMaxVoltageDifference_mV_)
+                if ((data.cellVoltages_[section*5 + i] - data.cellVoltages_[idCellMinVoltage_]) > conf.balancingMaxVoltageDifference_mV_)
                 {
                     int j = cellCounter;
-                    while (j > 0 && cellVoltages_[section*5 + cellList[j - 1]] < cellVoltages_[section*5 + i])
+                    while (j > 0 && data.cellVoltages_[section*5 + cellList[j - 1]] < data.cellVoltages_[section*5 + i])
                     {
                         cellList[j] = cellList[j - 1];
                         j--;
@@ -506,58 +426,58 @@ void bq769x0::updateBalancingSwitches(void) {
             }
 
 
-            if(m_Debug) {
+            if(conf.m_Debug) {
                 cout << stream::Flags::PGM << PSTR("Setting CELLBAL ") << uint8_t(section+1);
                 cout << stream::Flags::PGM << PSTR(" register to: ") << byte2char(balancingFlags) << EOL;
             }
 
 
-            balancingStatus_ |= balancingFlags << section*5;
+            data.balancingStatus_ |= balancingFlags << section*5;
 
             // set balancing register for this section
             writeRegister(CELLBAL1+section, balancingFlags);
 
         } // section loop
-    } else if (balancingStatus_ > 0) {
+    } else if (data.balancingStatus_ > 0) {
         // clear all CELLBAL registers
         for (uint8_t section = 0; section < numberOfSections; section++) {
 
-            if(m_Debug) {
+            if(conf.m_Debug) {
                 cout << stream::Flags::PGM << PSTR("Clearing Register CELLBAL ") << uint8_t(section+1) << EOL;
             }
 
             writeRegister(CELLBAL1+section, 0x0);
         }
-        balancingStatus_ = 0;
+        data.balancingStatus_ = 0;
     }
 }
 
 //----------------------------------------------------------------------------
 
-uint16_t bq769x0::getBalancingStatus() { return balancingStatus_; }
+// uint16_t bq769x0::getBalancingStatus() { return data.balancingStatus_; }
 
 //----------------------------------------------------------------------------
 
-void bq769x0::setShuntResistorValue(uint32_t res_uOhm) { shuntResistorValue_uOhm_ = res_uOhm; }
+// void bq769x0::setShuntResistorValue(uint32_t res_uOhm) { conf.shuntResistorValue_uOhm_ = res_uOhm; }
 
 //----------------------------------------------------------------------------
 
-void bq769x0::setThermistors(uint8_t bitflag) { thermistors_ = bitflag & ((1 << MAX_NUMBER_OF_THERMISTORS) - 1); }
+// void bq769x0::setThermistors(uint8_t bitflag) { conf.thermistors_ = bitflag & ((1 << MAX_NUMBER_OF_THERMISTORS) - 1); }
 
 //----------------------------------------------------------------------------
 
-void bq769x0::setThermistorBetaValue(uint16_t beta_K) { thermistorBetaValue_ = beta_K; }
+// // void bq769x0::setThermistorBetaValue(uint16_t beta_K) { thermistorBetaValue_ = beta_K; }
 
 //----------------------------------------------------------------------------
 
-void bq769x0::setBatteryCapacity(int32_t capacity_mAh,
-                                 uint16_t nomVoltage_mV,
-                                 uint16_t fullVoltage_mV)
-{
-    nominalCapacity_ = capacity_mAh * 60 * 60;
-    nominalVoltage_ = nomVoltage_mV;
-    fullVoltage_ = fullVoltage_mV;
-}
+// void bq769x0::setBatteryCapacity(int32_t capacity_mAh,
+//                                  uint16_t nomVoltage_mV,
+//                                  uint16_t fullVoltage_mV)
+// {
+//     conf.nominalCapacity_ = capacity_mAh * 60 * 60;
+//     conf.nominalVoltage_ = nomVoltage_mV;
+//     conf.fullVoltage_ = fullVoltage_mV;
+// }
 
 //----------------------------------------------------------------------------
 
@@ -568,7 +488,7 @@ void bq769x0::setOCV(uint16_t voltageVsSOC[NUM_OCV_POINTS]) {
 //----------------------------------------------------------------------------
 
 float bq769x0::getSOC(void) {
-    return (float) coulombCounter_ / nominalCapacity_ * 100.0;
+    return (float) coulombCounter_ / conf.nominalCapacity_ * 100.0;
 }
 
 //----------------------------------------------------------------------------
@@ -577,15 +497,15 @@ float bq769x0::getSOC(void) {
 void bq769x0::resetSOC(int percent) {
     
     if (percent <= 100 && percent >= 0) {
-        coulombCounter_ = (int32_t)(nominalCapacity_ * percent) / 100L;
+        coulombCounter_ = (int32_t)(conf.nominalCapacity_ * percent) / 100L;
     } else {  // reset based on OCV
 
-        if(m_Debug) {
+        if(conf.m_Debug) {
             cout << stream::Flags::PGM << PSTR("NumCells: ") << getNumberOfConnectedCells() << 
-                stream::Flags::PGM << PSTR(", voltage: ") << getBatteryVoltage() << 'V';
+            stream::Flags::PGM << PSTR(", voltage: ") << data.batVoltage_ << 'V';
         }
 
-        uint16_t voltage = getBatteryVoltage() / getNumberOfConnectedCells();
+        uint16_t voltage = data.batVoltage_ / getNumberOfConnectedCells();
 
         coulombCounter_ = 0;  // initialize with totally depleted battery (0% SOC)
 
@@ -593,11 +513,11 @@ void bq769x0::resetSOC(int percent) {
         {
             if (OCV_[i] <= voltage) {
                 if (i == 0) {
-                    coulombCounter_ = nominalCapacity_;  // 100% full
+                    coulombCounter_ = conf.nominalCapacity_;  // 100% full
                 }
                 else {
                     // interpolate between OCV[i] and OCV[i-1]
-                    coulombCounter_ = (double) nominalCapacity_ / (NUM_OCV_POINTS - 1.0) *
+                    coulombCounter_ = (double) conf.nominalCapacity_ / (NUM_OCV_POINTS - 1.0) *
                     (NUM_OCV_POINTS - 1.0 - i + ((float)voltage - OCV_[i])/(OCV_[i-1] - OCV_[i]));
                 }
                 return;
@@ -608,38 +528,39 @@ void bq769x0::resetSOC(int percent) {
 
 //----------------------------------------------------------------------------
 
-void bq769x0::adjADCPackOffset(int16_t offset) { adcPackOffset_ = offset; }
+// void bq769x0::adjADCPackOffset(int16_t offset) { conf.adcPackOffset_ = offset; }
 
-int16_t bq769x0::getADCPackOffset() { return adcOffset_ + adcPackOffset_; }
+int16_t bq769x0::getADCPackOffset() { return data.adcOffset_ + conf.adcPackOffset_; }
 
-void bq769x0::adjADCCellsOffset(int16_t offsets[MAX_NUMBER_OF_CELLS]) { adcCellsOffset_ = offsets; }
+// void bq769x0::adjADCCellsOffset(int16_t offsets[MAX_NUMBER_OF_CELLS]) { conf.adcCellsOffset_ = offsets; }
 
 int16_t bq769x0::getADCCellOffset(uint8_t cell) {
-    if(adcCellsOffset_) return adcOffset_ + adcCellsOffset_[cell];
-    return adcOffset_;
+//     if (conf.adcCellsOffset_)
+    return data.adcOffset_ + conf.adcCellsOffset_[cell];
+//     return data.adcOffset_;
 }
 
 //----------------------------------------------------------------------------
 
-void bq769x0::setTemperatureLimits(int16_t minDischarge_degC,
-                                   int16_t maxDischarge_degC,
-                                   int16_t minCharge_degC,
-                                   int16_t maxCharge_degC)
-{
-    // Temperature limits (°C/10)
-    minCellTempDischarge_ = minDischarge_degC * 10;
-    maxCellTempDischarge_ = maxDischarge_degC * 10;
-    minCellTempCharge_ = minCharge_degC * 10;
-    maxCellTempCharge_ = maxCharge_degC * 10;
-}
+// void bq769x0::setTemperatureLimits(int16_t minDischarge_degC,
+//                                    int16_t maxDischarge_degC,
+//                                    int16_t minCharge_degC,
+//                                    int16_t maxCharge_degC)
+// {
+//     // Temperature limits (°C/10)
+//     conf.minCellTempDischarge_ = minDischarge_degC * 10;
+//     conf.maxCellTempDischarge_ = maxDischarge_degC * 10;
+//     conf.minCellTempCharge_ = minCharge_degC * 10;
+//     conf.maxCellTempCharge_ = maxCharge_degC * 10;
+// }
 
 //----------------------------------------------------------------------------
 
-void bq769x0::setIdleCurrentThreshold(uint32_t current_mA) { idleCurrentThreshold_ = current_mA; }
+// void bq769x0::setIdleCurrentThreshold(uint32_t current_mA) { conf.idleCurrentThreshold_ = current_mA; }
 
 //----------------------------------------------------------------------------
 
-void bq769x0::setBalanceCharging(bool charging) { balanceCharging_ = charging; }
+// void bq769x0::setBalanceCharging(bool charging) { conf.balanceCharging_ = charging; }
 
 //----------------------------------------------------------------------------
 
@@ -648,7 +569,7 @@ uint32_t bq769x0::setShortCircuitProtection(uint32_t current_mA, uint16_t delay_
     protect1.bits.RSNS = PROTECT1_RSNS;
 
     protect1.bits.SCD_THRESH = 0;
-    uint8_t temp = (current_mA * shuntResistorValue_uOhm_) / 1000000UL;
+    uint8_t temp = (current_mA * conf.shuntResistorValue_uOhm_) / 1000000UL;
     for (uint8_t i = sizeof(SCD_threshold_setting)-1; i > 0; i--) {
         if (temp >= SCD_threshold_setting[i]) {
             protect1.bits.SCD_THRESH = i;
@@ -668,17 +589,17 @@ uint32_t bq769x0::setShortCircuitProtection(uint32_t current_mA, uint16_t delay_
 
     // returns the actual current threshold value
     return ((uint32_t)SCD_threshold_setting[protect1.bits.SCD_THRESH] * 1000000UL) /
-        shuntResistorValue_uOhm_;
+        conf.shuntResistorValue_uOhm_;
 }
 
 //----------------------------------------------------------------------------
 
-uint32_t bq769x0::setOvercurrentChargeProtection(uint32_t current_mA, uint16_t delay_ms)
-{
-    maxChargeCurrent_ = current_mA;
-    maxChargeCurrent_delay_ = delay_ms;
-    return 0;
-}
+// uint32_t bq769x0::setOvercurrentChargeProtection(uint32_t current_mA, uint16_t delay_ms)
+// {
+//     conf.maxChargeCurrent_ = current_mA;
+//     conf.maxChargeCurrent_delay_ = delay_ms;
+//     return 0;
+// }
 
 //----------------------------------------------------------------------------
 
@@ -687,7 +608,7 @@ uint32_t bq769x0::setOvercurrentDischargeProtection(uint32_t current_mA, uint16_
     regPROTECT2_t protect2;
 
     protect2.bits.OCD_THRESH = 0;
-    uint8_t temp = (current_mA * shuntResistorValue_uOhm_) / 1000000UL;
+    uint8_t temp = (current_mA * conf.shuntResistorValue_uOhm_) / 1000000UL;
     for (uint8_t i = sizeof(OCD_threshold_setting)-1; i > 0; i--) {
         if (temp >= OCD_threshold_setting[i]) {
             protect2.bits.OCD_THRESH = i;
@@ -707,7 +628,7 @@ uint32_t bq769x0::setOvercurrentDischargeProtection(uint32_t current_mA, uint16_
 
     // returns the actual current threshold value
     return ((uint32_t)OCD_threshold_setting[protect2.bits.OCD_THRESH] * 1000000UL) /
-        shuntResistorValue_uOhm_;
+        conf.shuntResistorValue_uOhm_;
 }
 
 
@@ -720,7 +641,7 @@ uint16_t bq769x0::setCellUndervoltageProtection(uint16_t voltage_mV, uint16_t de
 
     minCellVoltage_ = voltage_mV;
 
-    uint16_t uv_trip = ((((voltage_mV - adcOffset_) * 1000UL) / adcGain_) >> 4) & 0x00FF;
+    uint16_t uv_trip = ((((voltage_mV - data.adcOffset_) * 1000UL) / data.adcGain_) >> 4) & 0x00FF;
     uv_trip += 1;   // always round up for lower cell voltage
     writeRegister(UV_TRIP, uv_trip);
 
@@ -735,7 +656,7 @@ uint16_t bq769x0::setCellUndervoltageProtection(uint16_t voltage_mV, uint16_t de
     writeRegister(PROTECT3, protect3.regByte);
 
     // returns the actual voltage threshold value
-    return ((1UL << 12UL | uv_trip << 4) * adcGain_) / 1000UL + adcOffset_;
+    return ((1UL << 12UL | uv_trip << 4) * data.adcGain_) / 1000UL + data.adcOffset_;
 }
 
 //----------------------------------------------------------------------------
@@ -747,7 +668,7 @@ uint16_t bq769x0::setCellOvervoltageProtection(uint16_t voltage_mV, uint16_t del
 
     maxCellVoltage_ = voltage_mV;
 
-    uint16_t ov_trip = ((((voltage_mV - adcOffset_) * 1000UL) / adcGain_) >> 4) & 0x00FF;
+    uint16_t ov_trip = ((((voltage_mV - data.adcOffset_) * 1000UL) / data.adcGain_) >> 4) & 0x00FF;
     writeRegister(OV_TRIP, ov_trip);
 
     protect3.bits.OV_DELAY = 0;
@@ -761,68 +682,68 @@ uint16_t bq769x0::setCellOvervoltageProtection(uint16_t voltage_mV, uint16_t del
     writeRegister(PROTECT3, protect3.regByte);
 
     // returns the actual voltage threshold value
-    return ((uint32_t)(1 << 13 | ov_trip << 4) * adcGain_) / 1000UL + adcOffset_;
+    return ((uint32_t)(1 << 13 | ov_trip << 4) * data.adcGain_) / 1000UL + data.adcOffset_;
 }
 
 
 //----------------------------------------------------------------------------
 
-int32_t bq769x0::getBatteryCurrent(bool raw) {
-    if (raw) return batCurrent_raw_;
-    return batCurrent_;
-}
+// int32_t bq769x0::getBatteryCurrent(bool raw) {
+//     if (raw) return data.batCurrent_;
+//     return data.batCurrent_;
+// }
+// 
+// //----------------------------------------------------------------------------
+// 
+// uint32_t bq769x0::getBatteryVoltage(bool raw) {
+//     if (raw) return data.batVoltage_raw_;
+//     return data.batVoltage_;
+// }
 
 //----------------------------------------------------------------------------
 
-uint32_t bq769x0::getBatteryVoltage(bool raw) {
-    if (raw) return batVoltage_raw_;
-    return batVoltage_;
-}
+uint16_t bq769x0::getMaxCellVoltage() { return data.cellVoltages_[idCellMaxVoltage_]; }
 
 //----------------------------------------------------------------------------
 
-uint16_t bq769x0::getMaxCellVoltage() { return cellVoltages_[idCellMaxVoltage_]; }
+uint16_t bq769x0::getMinCellVoltage() { return data.cellVoltages_[idCellMinVoltage_]; }
 
 //----------------------------------------------------------------------------
 
-uint16_t bq769x0::getMinCellVoltage() { return cellVoltages_[idCellMinVoltage_]; }
-
-//----------------------------------------------------------------------------
-
-uint16_t bq769x0::getAvgCellVoltage() { return getBatteryVoltage() / getNumberOfConnectedCells(); }
+uint16_t bq769x0::getAvgCellVoltage() { return data.batVoltage_ / getNumberOfConnectedCells(); }
 
 //----------------------------------------------------------------------------
 
 uint16_t bq769x0::getCellVoltage(uint8_t idCell, bool raw) {
-    uint8_t i = cellIdMap_[idCell];
-    if (raw) return cellVoltages_raw_[i];
-    return cellVoltages_[i];
+    uint8_t i = data.cellIdMap_[idCell];
+    if (raw) return data.cellVoltages_raw_[i];
+    return data.cellVoltages_[i];
 }
 
 //----------------------------------------------------------------------------
 
 uint16_t bq769x0::getCellVoltage_(uint8_t i, bool raw) {
-    if (raw) return cellVoltages_raw_[i];
-    return cellVoltages_[i];
+    if (raw) return data.cellVoltages_raw_[i];
+    return data.cellVoltages_[i];
 }
 
 //----------------------------------------------------------------------------
 
 uint8_t bq769x0::getNumberOfCells(void) {
-    return numberOfCells_;
+    return NUMBER_OF_CELLS;
 }
 
 //----------------------------------------------------------------------------
 
 uint8_t bq769x0::getNumberOfConnectedCells(void) {
-    return connectedCells_;
+    return data.connectedCells_;
 }
 
 //----------------------------------------------------------------------------
 
 float bq769x0::getTemperatureDegC(uint8_t channel) {
     if (channel <= 2) {
-        return (float)temperatures_[channel] / 10.0;
+        return (float)data.temperatures_[channel] / 10.0;
     } else { return -273.15; }  // Error: Return absolute minimum temperature
 }
 
@@ -837,7 +758,7 @@ float bq769x0::getTemperatureDegF(uint8_t channel) {
 int16_t bq769x0::getLowestTemperature() {
     int16_t minTemp = INT16_MAX;
     for(uint8_t i = 0; i < MAX_NUMBER_OF_THERMISTORS; i++) {
-        if(thermistors_ & (1 << i) && temperatures_[i] < minTemp) minTemp = temperatures_[i];
+        if(conf.thermistors_ & (1 << i) && data.temperatures_[i] < minTemp) minTemp = data.temperatures_[i];
     }
     return minTemp;
 }
@@ -845,45 +766,36 @@ int16_t bq769x0::getLowestTemperature() {
 int16_t bq769x0::getHighestTemperature() {
     int16_t maxTemp = INT16_MIN;
     for(uint8_t i = 0; i < MAX_NUMBER_OF_THERMISTORS; i++) {
-        if(thermistors_ & (1 << i) && temperatures_[i] > maxTemp) maxTemp = temperatures_[i];
+        if(conf.thermistors_ & (1 << i) && data.temperatures_[i] > maxTemp) maxTemp = data.temperatures_[i];
     }
     return maxTemp;
 }
 
 //----------------------------------------------------------------------------
 
-void bq769x0::updateTemperatures() {
-    float tmp = 0;
-    int adcVal = 0;
-    int vtsx = 0;
-    uint32_t rts = 0;
-
+int16_t updateTemperatures_calc(const uint16_t val, const uint16_t beta) {
     // calculate R_thermistor according to bq769x0 datasheet
-    adcVal = readDoubleRegister(TS1_HI_BYTE);
-    vtsx = adcVal * 0.382; // mV
-    rts = 10000.0 * vtsx / (3300.0 - vtsx); // Ohm
-
+    uint16_t vtsx = val * 0.382; // mV
+    uint32_t rts = 10000.0 * vtsx / (3300.0 - vtsx); // Ohm
     // Temperature calculation using Beta equation
     // - According to bq769x0 datasheet, only 10k thermistors should be used
     // - 25°C reference temperature for Beta equation assumed
-    tmp = 1.0/(1.0/(273.15+25) + 1.0/thermistorBetaValue_*log(rts/10000.0)); // K
-    temperatures_[0] = (tmp - 273.15) * 10.0;
+    float tmp = 1.0/(1.0/(273.15+25) + 1.0/beta * log(rts/10000.0)); // K
+    return (tmp - 273.15) * 10.0;
+}
 
-    if (type_ == bq76930 || type_ == bq76940) {
-        adcVal = readDoubleRegister(TS2_HI_BYTE);
-        vtsx = adcVal * 0.382; // mV
-        rts = 10000.0 * vtsx / (3300.0 - vtsx); // Ohm
-        tmp = 1.0/(1.0/(273.15+25) + 1.0/thermistorBetaValue_*log(rts/10000.0)); // K
-        temperatures_[1] = (tmp - 273.15) * 10.0;
-    }
 
-    if (type_ == bq76940) {
-        adcVal = readDoubleRegister(TS3_HI_BYTE);
-        vtsx = adcVal * 0.382; // mV
-        rts = 10000.0 * vtsx / (3300.0 - vtsx); // Ohm
-        tmp = 1.0/(1.0/(273.15+25) + 1.0/thermistorBetaValue_*log(rts/10000.0)); // K
-        temperatures_[2] = (tmp - 273.15) * 10.0;
-    }
+void bq769x0::updateTemperatures() {
+    data.temperatures_[0] = updateTemperatures_calc(readDoubleRegister(TS1_HI_BYTE), conf.thermistorBetaValue_[0]);
+    
+#ifdef IC_BQ76930
+    data.temperatures_[1] = updateTemperatures_calc(readDoubleRegister(TS2_HI_BYTE), conf.thermistorBetaValue_[1]);
+#endif
+    
+#ifdef IC_BQ76940
+    data.temperatures_[1] = updateTemperatures_calc(readDoubleRegister(TS2_HI_BYTE), conf.thermistorBetaValue_[1]);
+    data.temperatures_[1] = updateTemperatures_calc(readDoubleRegister(TS3_HI_BYTE), conf.thermistorBetaValue_[1]);
+#endif
 }
 
 
@@ -898,28 +810,28 @@ void bq769x0::updateCurrent()
     if (sys_stat.bits.CC_READY == 1)
     {
         //Serial.println("reading CC register...");
-        batCurrent_raw_ = (int16_t)readDoubleRegister(CC_HI_BYTE);
-        batCurrent_ = ((int32_t)batCurrent_raw_ * 8440L) / (int32_t)shuntResistorValue_uOhm_;  // mA
+        data.batCurrent_ = (int16_t)readDoubleRegister(CC_HI_BYTE);
+        data.batCurrent_ = ((int32_t)data.batCurrent_ * 8440L) / (int32_t)conf.shuntResistorValue_uOhm_;  // mA
 
         // is read every 250 ms
-        coulombCounter_ += batCurrent_ / 4;
+        coulombCounter_ += data.batCurrent_ / 4;
 
-        if (coulombCounter_ > nominalCapacity_) {
-            coulombCounter_ = nominalCapacity_;
+        if (coulombCounter_ > conf.nominalCapacity_) {
+            coulombCounter_ = conf.nominalCapacity_;
         }
         if (coulombCounter_ < 0) {
             coulombCounter_ = 0;
         }
 
-        if (batCurrent_ < 0) {
-            coulombCounter2_ += -batCurrent_ / 4;
-            if (coulombCounter2_ > nominalCapacity_) {
+        if (data.batCurrent_ < 0) {
+            coulombCounter2_ += -data.batCurrent_ / 4;
+            if (coulombCounter2_ > conf.nominalCapacity_) {
                 batCycles_++;
                 coulombCounter2_ = 0;
             }
         }
 
-        if (batCurrent_ > (int32_t)idleCurrentThreshold_) {
+        if (data.batCurrent_ > (int32_t)conf.idleCurrentThreshold_) {
             if (!charging_) {
                 charging_ = 1;
                 chargeTimestamp_ = mcu::Timer::millis();
@@ -929,18 +841,18 @@ void bq769x0::updateCurrent()
                 chargedTimes_++;
             }
         }
-        else if (charging_ != 2 || batCurrent_ < 10)
+        else if (charging_ != 2 || data.batCurrent_ < 10)
             charging_ = 0;
 
         // reset idleTimestamp
-        if (abs(batCurrent_) > idleCurrentThreshold_) {
-            if(batCurrent_ < 0 || !(balanceCharging_ && charging_ == 2))
+        if (abs(data.batCurrent_) > conf.idleCurrentThreshold_) {
+            if(data.batCurrent_ < 0 || !(conf.balanceCharging_ && charging_ == 2))
                 idleTimestamp_ = mcu::Timer::millis();
         }
 
         // no error occured which caused alert
         if (!(sys_stat.regByte & 0b00111111)) {
-            alertInterruptFlag_ = false;
+            data.alertInterruptFlag_ = false;
         }
 
         writeRegister(SYS_STAT, 0b10000000);  // Clear CC ready flag
@@ -950,58 +862,58 @@ void bq769x0::updateCurrent()
 //----------------------------------------------------------------------------
 // reads all cell voltages to array cellVoltages[NUM_CELLS] and updates batVoltage
 
-void bq769x0::updateVoltages()
-{
+void bq769x0::updateVoltages() {
+    mcu::I2CMaster      Wire;
     uint16_t adcVal = 0;
     uint8_t idCell = 0;
     // read cell voltages
     i2buf[0] = VC1_HI_BYTE;
 
-    mcu::I2CMaster Wire;
+    // mcu::I2CMaster Wire;
     
-    Wire.write(I2CAddress_, i2buf, 1);
+    Wire.write(BQ769X0_I2C_ADDR, i2buf, 1);
 
     idCellMaxVoltage_ = 0;
     idCellMinVoltage_ = 0;
-    for (int i = 0; i < numberOfCells_; i++) {
-        if (crcEnabled_ == true) {
-            Wire.read(I2CAddress_, i2buf, 4);
-            uint8_t crc;
-            uint8_t data = i2buf[0];
-            adcVal = (data & 0b00111111) << 8;
+    for (int i = 0; i < NUMBER_OF_CELLS; i++) {
+#ifdef BQ769X0_CRC_ENABLED
+        Wire.read(BQ769X0_I2C_ADDR, i2buf, 4);
+        uint8_t crc;
+        uint8_t data_b = i2buf[0];
+        adcVal = (data_b & 0b00111111) << 8;
 
-            // CRC of first bytes includes slave address (including R/W bit) and data
-            crc = _crc8_ccitt_update(0, (I2CAddress_ << 1) | 1);
-            crc = _crc8_ccitt_update(crc, data);
-            if (crc != i2buf[1]) return; // don't save corrupted value
-            data = i2buf[2];
-            adcVal |= data;
+        // CRC of first bytes includes slave address (including R/W bit) and data
+        crc = _crc8_ccitt_update(0, (BQ769X0_I2C_ADDR << 1) | 1);
+        crc = _crc8_ccitt_update(crc, data_b);
+        if (crc != i2buf[1]) return; // don't save corrupted value
+        data_b = i2buf[2];
+        adcVal |= data_b;
 
-            // CRC of subsequent bytes contain only data
-            crc = _crc8_ccitt_update(0, data);
-            if (crc != i2buf[3]) return; // don't save corrupted value
+        // CRC of subsequent bytes contain only data
+        crc = _crc8_ccitt_update(0, data_b);
+        if (crc != i2buf[3]) return; // don't save corrupted value
             
-        } else {
-            Wire.read(I2CAddress_, i2buf, 2);
-            // reply
-            adcVal = (i2buf[0] & 0b00111111) << 8 | i2buf[1];
-        }
+#else
+        Wire.read(BQ769X0_I2C_ADDR, i2buf, 2);
+        // reply
+        adcVal = (i2buf[0] & 0b00111111) << 8 | i2buf[1];
+#endif
 
-        cellVoltages_raw_[i] = adcVal;
-        cellVoltages_[i] = ((uint32_t)adcVal * adcGain_) / 1000 + getADCCellOffset(i);
+        data.cellVoltages_raw_[i] = adcVal;
+        data.cellVoltages_[i] = ((uint32_t)adcVal * data.adcGain_) / 1000 + getADCCellOffset(i);
 
-        if (cellVoltages_[i] < 500) { continue; }
-        cellIdMap_[idCell] = i;
-        if (cellVoltages_[i] > cellVoltages_[idCellMaxVoltage_]) { idCellMaxVoltage_ = i; }
-        if (cellVoltages_[i] < cellVoltages_[idCellMinVoltage_]) { idCellMinVoltage_ = i; }
+        if (data.cellVoltages_[i] < 500) { continue; }
+        data.cellIdMap_[idCell] = i;
+        if (data.cellVoltages_[i] > data.cellVoltages_[idCellMaxVoltage_]) { idCellMaxVoltage_ = i; }
+        if (data.cellVoltages_[i] < data.cellVoltages_[idCellMinVoltage_]) { idCellMinVoltage_ = i; }
         idCell++;
     }
-    connectedCells_ = idCell;
+    data.connectedCells_ = idCell;
     // read battery pack voltage
-    batVoltage_raw_ = readDoubleRegister(BAT_HI_BYTE);
-    batVoltage_ = ((uint32_t)4.0 * adcGain_ * batVoltage_raw_) / 1000.0 + connectedCells_ * getADCPackOffset();
+    data.batVoltage_raw_ = readDoubleRegister(BAT_HI_BYTE);
+    data.batVoltage_ = ((uint32_t)4.0 * data.adcGain_ * data.batVoltage_raw_) / 1000.0 + data.connectedCells_ * getADCPackOffset();
 
-    if(batVoltage_ >= connectedCells_ * fullVoltage_) {
+    if(data.batVoltage_ >= data.connectedCells_ * conf.fullVoltage_) {
         if(fullVoltageCount_ == 240) { // 60s * 4(250ms)
             resetSOC(100);
         }
@@ -1015,75 +927,77 @@ void bq769x0::updateVoltages()
 //----------------------------------------------------------------------------
 
 void bq769x0::writeRegister(uint8_t address, uint8_t data) {
+    mcu::I2CMaster      Wire;
     i2buf[0] = address;
     i2buf[1] = data;
-    mcu::I2CMaster Wire;
-    if (crcEnabled_ == true) {
-        // CRC is calculated over the slave address (including R/W bit), register address, and data.
-        i2buf[2] = _crc8_ccitt_update(0, (I2CAddress_ << 1) | 0);
-        i2buf[2] = _crc8_ccitt_update(i2buf[2], address);
-        i2buf[2] = _crc8_ccitt_update(i2buf[2], data);
-        Wire.write(I2CAddress_, i2buf, 3);
-    } else {
-        Wire.write(I2CAddress_, i2buf, 2);
+    // mcu::I2CMaster Wire;
+#ifdef BQ769X0_CRC_ENABLED
+    // CRC is calculated over the slave address (including R/W bit), register address, and data.
+    i2buf[2] = _crc8_ccitt_update(0, (BQ769X0_I2C_ADDR << 1) | 0);
+    i2buf[2] = _crc8_ccitt_update(i2buf[2], address);
+    i2buf[2] = _crc8_ccitt_update(i2buf[2], data);
+    Wire.write(BQ769X0_I2C_ADDR, i2buf, 3);
+#else
+    Wire.write(BQ769X0_I2C_ADDR, i2buf, 2);
+#endif
     }
-}
+
 
 //----------------------------------------------------------------------------
 
 uint8_t bq769x0::readRegister(uint8_t address) {
+    mcu::I2CMaster      Wire;
     i2buf[0] = address;
-    mcu::I2CMaster Wire;
-    Wire.write(I2CAddress_, i2buf, 1);
+    // mcu::I2CMaster Wire;
+    Wire.write(BQ769X0_I2C_ADDR, i2buf, 1);
     uint8_t data;
-    if (crcEnabled_ == true) {
-        uint8_t wantcrc;
-        uint8_t gotcrc;
-        do {
-            Wire.read(I2CAddress_, i2buf, 2);
-            data   = i2buf[0];
-            gotcrc = i2buf[1];
-            // CRC is calculated over the slave address (including R/W bit) and data.
-            wantcrc = _crc8_ccitt_update(0, (I2CAddress_ << 1) | 1);
-            wantcrc = _crc8_ccitt_update(wantcrc, data);
-        } while (gotcrc != wantcrc);
-    }
-    else {
-        Wire.read(I2CAddress_, i2buf, 1);
-        data = i2buf[0];
-    }
-
+#ifdef BQ769X0_CRC_ENABLED
+    uint8_t wantcrc;
+    uint8_t gotcrc;
+    do {
+        Wire.read(BQ769X0_I2C_ADDR, i2buf, 2);
+        data   = i2buf[0];
+        gotcrc = i2buf[1];
+        // CRC is calculated over the slave address (including R/W bit) and data.
+        wantcrc = _crc8_ccitt_update(0, (BQ769X0_I2C_ADDR << 1) | 1);
+        wantcrc = _crc8_ccitt_update(wantcrc, data);
+    } while (gotcrc != wantcrc);
+#else
+    Wire.read(BQ769X0_I2C_ADDR, i2buf, 1);
+    data = i2buf[0];
+#endif
     return data;
 }
 
 //----------------------------------------------------------------------------
 
 uint16_t bq769x0::readDoubleRegister(uint8_t address) {
+    mcu::I2CMaster      Wire;
     i2buf[0] = address;
-    mcu::I2CMaster Wire;
-    Wire.write(I2CAddress_, i2buf, 1);
+    // mcu::I2CMaster Wire;
+    Wire.write(BQ769X0_I2C_ADDR, i2buf, 1);
     uint16_t result;
-    if (crcEnabled_ == true) {
-        while(true) {
-            Wire.read(I2CAddress_, i2buf, 4);
-            uint8_t crc;
-            uint8_t data = i2buf[0];
-            result = (uint16_t)data << 8;
-            // CRC of first bytes includes slave address (including R/W bit) and data
-            crc = _crc8_ccitt_update(0, (I2CAddress_ << 1) | 1);
-            crc = _crc8_ccitt_update(crc, data);
-            if (crc != i2buf[1]) continue;
-            data = i2buf[2];
-            result |= data;
-            // CRC of subsequent bytes contain only data
-            crc = _crc8_ccitt_update(0, data);
-            if (crc != i2buf[3]) continue;
-            break;
-        }
-    } else {
-        Wire.read(I2CAddress_, i2buf, 2);
-        result = ((uint16_t)i2buf[0] << 8) | i2buf[1];
+#ifdef BQ769X0_CRC_ENABLED
+    while(true) {
+        Wire.read(BQ769X0_I2C_ADDR, i2buf, 4);
+        uint8_t crc;
+        uint8_t data = i2buf[0];
+        result = (uint16_t)data << 8;
+        // CRC of first bytes includes slave address (including R/W bit) and data
+        crc = _crc8_ccitt_update(0, (BQ769X0_I2C_ADDR << 1) | 1);
+        crc = _crc8_ccitt_update(crc, data);
+        if (crc != i2buf[1]) continue;
+        data = i2buf[2];
+        result |= data;
+        // CRC of subsequent bytes contain only data
+        crc = _crc8_ccitt_update(0, data);
+        if (crc != i2buf[3]) continue;
+        break;
     }
+#else
+    Wire.read(BQ769X0_I2C_ADDR, i2buf, 2);
+    result = ((uint16_t)i2buf[0] << 8) | i2buf[1];
+#endif
     return result;
 }
 
@@ -1091,11 +1005,10 @@ uint16_t bq769x0::readDoubleRegister(uint8_t address) {
 // The bq769x0 drives the ALERT pin high if the SYS_STAT register contains
 // a new value (either new CC reading or an error)
 
-void bq769x0::setAlertInterruptFlag()
-{
-    interruptTimestamp_ = mcu::Timer::millis();
-    alertInterruptFlag_ = true;
-}
+// void bq769x0::setAlertInterruptFlag() {
+// // //     interruptTimestamp_ = mcu::Timer::millis();
+//     data.alertInterruptFlag_ = true;
+// }
 
 //----------------------------------------------------------------------------
 // Check custom error conditions like over/under temperature, over charge current
@@ -1103,31 +1016,31 @@ void bq769x0::setAlertInterruptFlag()
 void bq769x0::checkUser()
 {
     // charge temperature limits
-    if(getLowestTemperature() < minCellTempCharge_ || getHighestTemperature() > maxCellTempCharge_)
+    if(getLowestTemperature() < conf.minCellTempCharge_ || getHighestTemperature() > conf.maxCellTempCharge_)
     {
-        if(!(chargingDisabled_ & (1 << ERROR_USER_CHG_TEMP)))
+        if(!(data.chargingDisabled_ & (1 << ERROR_USER_CHG_TEMP)))
         {
             disableCharging(1 << ERROR_USER_CHG_TEMP);
             errorCounter_[ERROR_USER_CHG_TEMP]++;
-            errorTimestamps_[ERROR_USER_CHG_TEMP] = mcu::Timer::millis();
+            data.errorTimestamps_[ERROR_USER_CHG_TEMP] = mcu::Timer::millis();
         }
     }
-    else if(chargingDisabled_ & (1 << ERROR_USER_CHG_TEMP))
+    else if(data.chargingDisabled_ & (1 << ERROR_USER_CHG_TEMP))
     {
         enableCharging(1 << ERROR_USER_CHG_TEMP);
     }
 
     // discharge temperature limits
-    if(getLowestTemperature() < minCellTempDischarge_ || getHighestTemperature() > maxCellTempDischarge_)
+    if(getLowestTemperature() < conf.minCellTempDischarge_ || getHighestTemperature() > conf.maxCellTempDischarge_)
     {
-        if(!(dischargingDisabled_ & (1 << ERROR_USER_DISCHG_TEMP)))
+        if(!(data.dischargingDisabled_ & (1 << ERROR_USER_DISCHG_TEMP)))
         {
             disableDischarging(1 << ERROR_USER_DISCHG_TEMP);
             errorCounter_[ERROR_USER_DISCHG_TEMP]++;
-            errorTimestamps_[ERROR_USER_DISCHG_TEMP] = mcu::Timer::millis();
+            data.errorTimestamps_[ERROR_USER_DISCHG_TEMP] = mcu::Timer::millis();
         }
     }
-    else if(dischargingDisabled_ & (1 << ERROR_USER_DISCHG_TEMP))
+    else if(data.dischargingDisabled_ & (1 << ERROR_USER_DISCHG_TEMP))
     {
         enableDischarging(1 << ERROR_USER_DISCHG_TEMP);
     }
@@ -1135,38 +1048,29 @@ void bq769x0::checkUser()
     // charge current limit
     // charge current can also come through discharge FET that we can't turn off (regen on P-)
     // that's why this looks a bit funky
-    if(batCurrent_ > maxChargeCurrent_)
+    if(data.batCurrent_ > conf.maxChargeCurrent_)
     {
         user_CHGOCD_ReleaseTimestamp_ = 0;
 
-        if(chargingEnabled_ && !(chargingDisabled_ & (1 << ERROR_USER_CHG_OCD)))
-        {
+        if(data.chargingEnabled_ && !(data.chargingDisabled_ & (1 << ERROR_USER_CHG_OCD))) {
             if(!user_CHGOCD_TriggerTimestamp_)
                 user_CHGOCD_TriggerTimestamp_ = mcu::Timer::millis();
-
-            if((mcu::Timer::millis() - user_CHGOCD_TriggerTimestamp_) > maxChargeCurrent_delay_ || user_CHGOCD_ReleasedNow_)
-            {
+            if((mcu::Timer::millis() - user_CHGOCD_TriggerTimestamp_) > conf.maxChargeCurrent_delay_ || data.user_CHGOCD_ReleasedNow_) {
                 disableCharging(1 << ERROR_USER_CHG_OCD);
                 errorCounter_[ERROR_USER_CHG_OCD]++;
-                errorTimestamps_[ERROR_USER_CHG_OCD] = mcu::Timer::millis();
+                data.errorTimestamps_[ERROR_USER_CHG_OCD] = mcu::Timer::millis();
             }
         }
-    }
-    else
-    {
+    } else {
         user_CHGOCD_TriggerTimestamp_ = 0;
-        user_CHGOCD_ReleasedNow_ = false;
-
-        if(chargingDisabled_ & (1 << ERROR_USER_CHG_OCD))
-        {
+        data.user_CHGOCD_ReleasedNow_ = false;
+        if(data.chargingDisabled_ & (1 << ERROR_USER_CHG_OCD)) {
             if(!user_CHGOCD_ReleaseTimestamp_)
                 user_CHGOCD_ReleaseTimestamp_ = mcu::Timer::millis();
-
-            if((uint32_t)(mcu::Timer::millis() - user_CHGOCD_ReleaseTimestamp_) > 10UL * 1000UL)
-            {
+            if((uint32_t)(mcu::Timer::millis() - user_CHGOCD_ReleaseTimestamp_) > 10UL * 1000UL) {
                 enableCharging(1 << ERROR_USER_CHG_OCD);
                 user_CHGOCD_ReleaseTimestamp_ = 0;
-                user_CHGOCD_ReleasedNow_ = true;
+                data.user_CHGOCD_ReleasedNow_ = true;
             }
         }
     }
@@ -1186,10 +1090,10 @@ void bq769x0::printRegisters() {
     cout << stream::Flags::PGM << PSTR("\r\n0x0B CC_CFG:    ") << byte2char(readRegister(CC_CFG));
     cout << stream::Flags::PGM << PSTR("\r\n0x32 CC_HI_LO:  ") << readDoubleRegister(CC_HI_BYTE);
     cout << stream::Flags::PGM << PSTR("\r\n0x2A BAT_HI_LO: ") << readDoubleRegister(BAT_HI_BYTE);
-    cout << stream::Flags::PGM << PSTR("\r\nADCGAIN:        ") << adcGain_;
-    cout << stream::Flags::PGM << PSTR("\r\nADCOFFSET:      ") << (uint16_t)adcOffset_;
-    cout << stream::Flags::PGM << PSTR("\r\nCHG DIS:        ") << chargingDisabled_;
-    cout << stream::Flags::PGM << PSTR("\r\nDISCHG DIS:     ") << dischargingDisabled_ << "\r\n";
+    cout << stream::Flags::PGM << PSTR("\r\nADCGAIN:        ") << data.adcGain_;
+    cout << stream::Flags::PGM << PSTR("\r\nADCOFFSET:      ") << (uint16_t)data.adcOffset_;
+    cout << stream::Flags::PGM << PSTR("\r\nCHG DIS:        ") << data.chargingDisabled_;
+    cout << stream::Flags::PGM << PSTR("\r\nDISCHG DIS:     ") << data.dischargingDisabled_ << "\r\n";
 }
 
 

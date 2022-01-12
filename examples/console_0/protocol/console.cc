@@ -2,7 +2,8 @@
 #include <stdlib.h>
 #include "mcu/watchdog.h"
 #include <avr/interrupt.h>
-
+#include <avr/eeprom.h>
+#include <avr/pgmspace.h>
 
 
 namespace {
@@ -12,13 +13,82 @@ extern "C" uint16_t get_free_mem() {
     int16_t Free__Ram = (int16_t) &v - (__brkval == 0 ? (int16_t) &__heap_start : (int16_t) __brkval);
     return (uint16_t)abs(Free__Ram);
 }
-}
+} // !namespace
 
 #define BackSpace  0x08
 #define Delete 0x7F
 
 namespace protocol {
 
+uint8_t gencrc8(uint8_t *data, uint16_t len) {
+    uint8_t crc = 0;
+    for (uint16_t i = 0; i < len; i++) {
+        crc = devices::_crc8_ccitt_update(crc, data[i]);
+    }
+    return crc;
+}
+    
+devices::bq769_conf EEMEM In_EEPROM_conf;
+    
+void Console::conf_load() {
+    cout << stream::Flags::PGM << PSTR("conf load ");
+    eeprom_read_block(&bq76940_conf, &In_EEPROM_conf, sizeof(bq76940_conf));
+    if (bq76940_conf.crc8 != gencrc8((uint8_t*)&bq76940_conf, sizeof(bq76940_conf)-1)) {
+        conf_default();
+        cout << stream::Flags::PGM << PSTR("crc FAIL, restore defs\r\n");
+    } else cout << stream::Flags::PGM << PSTR("OK\r\n");
+}
+
+void Console::conf_default() {
+    bq76940_conf.m_Debug                    = false;
+    bq76940_conf.thermistors_               = MAX_NUMBER_OF_THERMISTORS;
+    bq76940_conf.balanceCharging_           = true; // false
+    bq76940_conf.autoBalancingEnabled_      = true; // false
+    bq76940_conf.shuntResistorValue_uOhm_   = 1000; // 1mOhm
+    
+    bq76940_conf.thermistorBetaValue_[0]    = 3435;
+#ifdef IC_BQ76930
+    bq76940_conf.thermistorBetaValue_[1]    = 3435;
+#endif
+#ifdef IC_BQ76940
+    bq76940_conf.thermistorBetaValue_[1]    = 3435;
+    bq76940_conf.thermistorBetaValue_[2]    = 3435;
+#endif
+    
+    bq76940_conf.nominalVoltage_            = 3600;     // mV, nominal voltage of single cell in battery pack
+    bq76940_conf.fullVoltage_               = 4180;     // mV, full voltage of single cell in battery pack
+    bq76940_conf.nominalCapacity_           = 360000;   // mAs (*3600), nominal capacity of battery pack, max. 580 Ah possible @ 3.7V
+    bq76940_conf.maxChargeCurrent_          = 5500;     // Current limits (mA)
+    bq76940_conf.maxChargeCurrent_delay_    = 3000;     // Current limits Ms
+    // setOvercurrentDischargeProtection TODO
+    bq76940_conf.idleCurrentThreshold_      = 500;  // 30 Current (mA)
+    
+    // TODO for any sensors
+    bq76940_conf.minCellTempCharge_         =    0; // Temperature limits (C/10)
+    bq76940_conf.maxCellTempCharge_         =  500; // Temperature limits (C/10)
+    bq76940_conf.minCellTempDischarge_      = -200; // Temperature limits (C/10)
+    bq76940_conf.maxCellTempDischarge_      =  650; // Temperature limits (C/10)
+    
+    bq76940_conf.balancingMinCellVoltage_mV_        = 3600; // Cell voltage (mV)
+    bq76940_conf.balancingMaxVoltageDifference_mV_  = 10;   // 20 
+    bq76940_conf.balancingMinIdleTime_s_            = 1800;
+    
+    bq76940_conf.adcPackOffset_             = 0; // mV
+    memset(bq76940_conf.adcCellsOffset_, 0, sizeof(bq76940_conf.adcCellsOffset_));
+    // Cell voltage limits (mV)
+    bq76940_conf.maxCellVoltage_        = 4200; // setting and load
+    bq76940_conf.maxCellVoltage_delay_  = 2;    // s
+    bq76940_conf.minCellVoltage_        = 2850; // setting and load
+    bq76940_conf.minCellVoltage_delay_  = 2;    // s
+}
+
+void Console::conf_save() {
+    bq76940_conf.ts = mcu::Timer::millis(); // WTF!
+    bq76940_conf.crc8 = gencrc8((uint8_t*)&bq76940_conf, sizeof(bq76940_conf)-1);
+    eeprom_write_block(&bq76940_conf, &In_EEPROM_conf, sizeof(bq76940_conf));
+    cout << stream::Flags::PGM << PSTR("Saved\r\n");
+}
+    
 void Console::write_help(stream::OutputStream &out, const char *cmd, const char *help) {
     out << "  " << stream::PGM << cmd;
     uint8_t len = strlen_P(cmd);
@@ -30,119 +100,125 @@ void Console::write_help(stream::OutputStream &out, const char *cmd, const char 
 Console::Console():
     ser(mcu::Usart::get()),
     cout(ser),
-    bq(devices::bq769x0::bq76940, 0x08, true)
+    bq(bq76940_conf, bq76940_data),
+//     echo(false),
+    handle_result(false),
+//     m_interruptFlag(false),
+    param_len(0),
+    handle_len(0),
+    m_lastUpdate(0),
+    m_oldMillis(0),
+    m_millisOverflows(0),
+    len(0),
+    state(CONSOLE_STARTUP)
 {
-    // memset(&a, 0, sizeof(a));
+    cout << stream::Flags::PGM << PSTR("not365 Console ");
+    conf_load();
 }
 
-// void Console::setDebug(bool dbg) {
-//     m_Debug = dbg;
-//     bq.setDebug(m_Debug);
-// }
-
-void Console::start() {
-    loadSettings();
-    applySettings();
+void Console::begin() {
+    bq.begin();
+//     bq76940_conf.m_Debug = true;
+    postconf_fix();
     bq.update();
     bq.resetSOC(100);
     bq.enableCharging();
     bq.enableDischarging(); // todo
     bq.printRegisters();
-    bq.setDebug(false);
     debug_print();
 }
 
-
-// void Console::print() {
-//     if (!m_Debug) return;
-//     bq.printRegisters();
-//     debug_print();
+// void Console::alertISR() {
+//     bq76940_data.alertInterruptFlag_ = true;
+// //     m_interruptFlag = true;
 // }
 
-
-void Console::alertISR() {
-    bq.setAlertInterruptFlag();
-    m_interruptFlag = true;
-}
-
-bool Console::update(mcu::Pin job) {
+bool Console::update(mcu::Pin job, const bool force) {
+    bool result = force;
+    bq76940_data.alertInterruptFlag_ = force;
     uint32_t now = mcu::Timer::millis();
-    
-    if(m_interruptFlag || (uint32_t)(now - m_lastUpdate) >= 240) { // 500
+    if(force || (uint32_t)(now - m_lastUpdate) >= 500) { // 500
         job = 1;
-        if(m_interruptFlag) m_interruptFlag = false;
+//         if(m_interruptFlag) m_interruptFlag = false;
         uint8_t error = bq.update(); // should be called at least every 250 ms
         m_lastUpdate = now;
-        /*
-            // charging state
-            if(bq.getBatteryCurrent()       > (int16_t)m_Settings.idle_currentThres) packet.status |= (1 << 6); // charging
-            else if(bq.getBatteryCurrent()  < (int16_t)m_Settings.idle_currentThres / 2) packet.status &= ~(1 << 6);
-            if(error & STAT_OV) { packet.status |= (1 << 9); error &= ~STAT_OV; } // overvoltage
-            else packet.status &= ~(1 << 9);
-            uint16_t batVoltage = bq.getBatteryVoltage() / 10;
-            if(batVoltage > packet.max_voltage) packet.max_voltage = batVoltage;
-            int16_t batCurrent = bq.getBatteryCurrent() / 10;
-            if(batCurrent > 0 && (uint16_t)batCurrent > packet.max_charge_current)
-                packet.max_charge_current = batCurrent;
-            else if(batCurrent < 0 && (uint16_t)-batCurrent > packet.max_discharge_current)
-                packet.max_discharge_current = -batCurrent;
-                0
-            packet.capacity_left = packet.design_capacity * bq.getSOC() / 100.0;
-            packet.percent_left = bq.getSOC();
-            packet.current = -batCurrent;
-            packet.voltage = batVoltage;
-            packet.temperature[0] = bq.getTemperatureDegC(1) + 20.0;
-            packet.temperature[1] = bq.getTemperatureDegC(2) + 20.0;
-                
-            if(bq.getHighestTemperature() > (m_Settings.temp_maxDischargeC - 3) * 10)
-                packet.status |= (1 << 10); // overheat
-            else
-                packet.status &= ~(1 << 10);
-                    
-            if(bq.batCycles_) {
-                packet.num_cycles += bq.batCycles_;
-                bq.batCycles_ = 0;
-                m_Settings.num_cycles = packet.num_cycles;
-                saveSettings();
-            }
-                    
-                    if(bq.chargedTimes_) {
-                        packet.num_charged += bq.chargedTimes_;
-                        m_Settings.num_charged = packet.num_charged;
-                        bq.chargedTimes_ = 0;
-                    }
-                    
-                    uint8_t numCells = bq.getNumberOfConnectedCells();
-                    for(uint8_t i = 0; i < numCells; i++)
-                        packet.cell_voltages[i] = bq.getCellVoltage(i);
-                    
-                    // cell voltage difference too big
-                    uint16_t bigDelta = bq.getMaxCellVoltage() - bq.getMinCellVoltage();
-                    if(bigDelta > 100)
-                        error = 1;
-                    
-                    if(error)
-                        packet.status &= ~1;
-                    else
-                        packet.status |= 1;
 
-        */
+        // charging state
+        //if(bq.getBatteryCurrent()       > (int16_t)m_Settings.idle_currentThres) packet.status |= (1 << 6); // charging
+        //else if(bq.getBatteryCurrent()  < (int16_t)m_Settings.idle_currentThres / 2) packet.status &= ~(1 << 6);
+        if(error & STAT_OV) { cout << stream::Flags::PGM << PSTR("overvoltage\r\n"); }
+            //packet.status |= (1 << 9); error &= ~STAT_OV; } // overvoltage
+        //else packet.status &= ~(1 << 9);
+        
+//         uint16_t batVoltage = bq.getBatteryVoltage() / 10;
+//         if(batVoltage > packet.max_voltage) packet.max_voltage = batVoltage;
+//         int16_t batCurrent = bq.getBatteryCurrent() / 10;
+//         if(batCurrent > 0 && (uint16_t)batCurrent > packet.max_charge_current)
+//             packet.max_charge_current = batCurrent;
+//         else if(batCurrent < 0 && (uint16_t)-batCurrent > packet.max_discharge_current)
+//             packet.max_discharge_current = -batCurrent;
+//             0
+        // packet.capacity_left = packet.design_capacity * bq.getSOC() / 100.0;
+        // packet.percent_left = bq.getSOC();
+        //packet.current = -batCurrent;
+        //packet.voltage = batVoltage;
+        //packet.temperature[0] = bq.getTemperatureDegC(1) + 20.0;
+        //packet.temperature[1] = bq.getTemperatureDegC(2) + 20.0;
+            
+        //if(bq.getHighestTemperature() > (m_Settings.temp_maxDischargeC - 3) * 10)
+        //    packet.status |= (1 << 10); // overheat
+        //else
+        //    packet.status &= ~(1 << 10);
+                
+        if(bq.batCycles_) {
+//             packet.num_cycles += bq.batCycles_;
+//             bq.batCycles_ = 0;
+//             m_Settings.num_cycles = packet.num_cycles;
+//             saveSettings();
+        }
+                
+        if(bq.chargedTimes_) {
+//             packet.num_charged += bq.chargedTimes_;
+//             m_Settings.num_charged = packet.num_charged;
+//             bq.chargedTimes_ = 0;
+        }
+                
+        uint8_t numCells = bq.getNumberOfConnectedCells();
+//         for(uint8_t i = 0; i < numCells; i++)
+//             packet.cell_voltages[i] = bq.getCellVoltage(i);
+        
+        // cell voltage difference too big
+        uint16_t bigDelta = bq.getMaxCellVoltage() - bq.getMinCellVoltage();
+        if(bigDelta > 100) cout << stream::Flags::PGM << PSTR("difference too big\r\n");
+//             error = 1;
+//         
+//         if(error)
+//             packet.status &= ~1;
+//         else
+//             packet.status |= 1;
+
         if(m_oldMillis > now)
             m_millisOverflows++;
         m_oldMillis = now;
         job = 0;
     }
     
+    return result;
 
-    return Recv();
+//     return Recv();
 }
 
-void Console::command_apply() { applySettings(); }
-void Console::command_restore() { loadSettings(); }
-void Console::command_save() { saveSettings(); }
+void Console::postconf_fix() {
+    bq.setCellUndervoltageProtection(bq76940_conf.minCellVoltage_, bq76940_conf.minCellVoltage_delay_);
+    bq.setCellOvervoltageProtection(bq76940_conf.maxCellVoltage_, bq76940_conf.maxCellVoltage_delay_);
+}
+
+void Console::command_apply()   { conf_load(); postconf_fix(); }
+void Console::command_restore() { conf_default(); postconf_fix(); }
+void Console::command_save()    { conf_save(); }
 void Console::command_print() { debug_print(); }
 void Console::command_bqregs() { bq.printRegisters(); }
-void Console::command_bqdbg() { if (param_len) { bq.setDebug((bool)atoi(param)); } }
+void Console::command_bqdbg() { if (param_len) { bq76940_conf.m_Debug = (bool)atoi(param); } }
 void Console::command_wdtest() { for (;;) { (void)0; } }
 void Console::command_freemem() { cout << stream::Flags::PGM << PSTR(" Free RAM:") << get_free_mem() << EOL; }
 typedef void (*do_reboot_t)(void);
@@ -195,20 +271,24 @@ char const STR_CMD_EPFORMAT_HLP[] PROGMEM   = "formating EEPROM (load defaults s
 char const STR_CMD_HELP[] PROGMEM   = "help";
 char const STR_CMD_HELP_HLP[] PROGMEM   = "this 'help'";
 
-
-// // // // // // char const STR_CMD_HELP[] PROGMEM   = "help";
-// // // // // // char const STR_CMD_HELP_HLP[] PROGMEM   = "this 'help'";
-
-
-char const STR_CMD_BQDBG[] PROGMEM   = "bqdbg";
-char const STR_CMD_BQDBG_HLP[] PROGMEM   = "enable (1) or disable (0) debug events on BQ769x0";
-
-char const STR_CMD_BQREGS[] PROGMEM   = "bqregs";
+char const STR_CMD_BQDBG[]      PROGMEM   = "bqdbg";
+char const STR_CMD_BQDBG_HLP[]  PROGMEM   = "enable (1) or disable (0) debug events on BQ769x0";
+char const STR_CMD_BQREGS[]     PROGMEM   = "bqregs";
 char const STR_CMD_BQREGS_HLP[] PROGMEM   = "print regs in BQ769x0";
 
+char const STR_CMD_SHUTDOWN[]       PROGMEM = "shutdown";
+char const STR_CMD_SHUTDOWN_HLP[]   PROGMEM = "bye...bye...'";
 
 
-void Console::commandHelp() {
+void Console::command_shutdown() {
+    //TODO save data, stats
+    cout << stream::PGM << STR_CMD_SHUTDOWN_HLP;
+    bq.shutdown();
+}
+
+
+
+void Console::command_help() {
     cout << stream::PGM << PSTR("Available commands:\r\n") << EOL;
     write_help(cout, STR_CMD_APPLY,     STR_CMD_APPLY_HLP);
     write_help(cout, STR_CMD_RESTORE,   STR_CMD_RESTORE_HLP);
@@ -221,6 +301,7 @@ void Console::commandHelp() {
     write_help(cout, STR_CMD_FREEMEM,   STR_CMD_FREEMEM_HLP);
     write_help(cout, STR_CMD_EPFORMAT,  STR_CMD_EPFORMAT_HLP);
     write_help(cout, STR_CMD_HELP,      STR_CMD_HELP_HLP);
+    write_help(cout, STR_CMD_SHUTDOWN,  STR_CMD_SHUTDOWN_HLP);
     cout << EOL;
 }
 
@@ -241,6 +322,13 @@ void Console::compare_cmd(const char *name_P, SerialCommandHandler handler) {
     }
 }
 
+
+
+// char const STR_CMD_SHUTDOWN[]       PROGMEM = "shutdown";
+// char const STR_CMD_SHUTDOWN_HLP[]   PROGMEM = "bye...bye...'";
+// 
+
+
 bool Console::handleCommand(const char *buffer, const uint8_t len) {
     if (buffer[0] == 0) return false;
     handle_result = false;
@@ -256,7 +344,9 @@ bool Console::handleCommand(const char *buffer, const uint8_t len) {
     compare_cmd(STR_CMD_BOOTLOADER, &Console::command_bootloader);
     compare_cmd(STR_CMD_FREEMEM,    &Console::command_freemem);
     compare_cmd(STR_CMD_EPFORMAT,   &Console::command_format_EEMEM);
-    compare_cmd(STR_CMD_HELP,       &Console::commandHelp);
+    compare_cmd(STR_CMD_HELP,       &Console::command_help);
+    compare_cmd(STR_CMD_SHUTDOWN,   &Console::command_shutdown);
+    
     if (!handle_result) { cout << stream::PGM << PSTR("Unknown command. Try 'help'") << EOL; }
     return handle_result;
 }
@@ -268,15 +358,13 @@ bool Console::Recv() {
         state = CONSOLE_ACCUMULATING;
     } else if (state == CONSOLE_ACCUMULATING) {
         while (ser.avail()) {
-            
-// // // // //             ser.enableTX();
             result = true;
             ch = ser.read();
-            if (len == 0 && ch == '$') echo = false;
-            if (echo) {
+//             if (len == 0 && ch == '$') echo = false;
+//             if (echo) {
                 ser.write(ch);
                 if (ch == CR) ser.write(LF);
-            }
+//             }
             if (ch == BackSpace || ch == Delete) {
                 if (len) buffer[--len] = 0;
             } else {
@@ -292,7 +380,7 @@ bool Console::Recv() {
         handleCommand(buffer, len);
         cout << "BMS>";
         len = 0;
-        echo = true;
+//         echo = true;
         state = CONSOLE_ACCUMULATING;
     }
     return result;
@@ -300,18 +388,16 @@ bool Console::Recv() {
 
 
 void Console::debug_print() {
-
-    
     uint32_t uptime = m_millisOverflows * (0xffffffffLL / 1000UL);
     uptime += mcu::Timer::millis() / 1000;
     cout << stream::Flags::PGM << PSTR("uptime: ") << uptime << EOL;
     cout << stream::Flags::PGM << 
-    PSTR("Battery voltage: ") << bq.getBatteryVoltage() << stream::Flags::PGM <<
-    PSTR(" (") << bq.getBatteryVoltage(true) << stream::Flags::PGM << PSTR(")\r\n");
+    PSTR("Battery voltage: ") << bq76940_data.batVoltage_ << stream::Flags::PGM <<
+    PSTR(" (") << bq76940_data.batVoltage_raw_ << stream::Flags::PGM << PSTR(")\r\n");
     
     cout << stream::Flags::PGM <<
-    PSTR("Battery current: ") << bq.getBatteryCurrent() << stream::Flags::PGM <<
-    PSTR(" (") << bq.getBatteryCurrent(true) << stream::Flags::PGM << PSTR(")\r\n"); // TODO
+    PSTR("Battery current: ") << bq76940_data.batCurrent_ << stream::Flags::PGM <<
+    PSTR(" (") << bq76940_data.batCurrent_raw_ << stream::Flags::PGM << PSTR(")\r\n"); // TODO
     
     cout << stream::Flags::PGM << PSTR("SOC: ") << bq.getSOC() << EOL; 
     
@@ -320,7 +406,7 @@ void Console::debug_print() {
     bq.getTemperatureDegC(1) << ' ' <<
     bq.getTemperatureDegC(2) << EOL;
     uint8_t numCells = bq.getNumberOfCells();
-    cout << stream::Flags::PGM << PSTR("Balancing status: ") << bq.getBalancingStatus() << EOL;
+    cout << stream::Flags::PGM << PSTR("Balancing status: ") << bq76940_data.balancingStatus_ << EOL;
     cout << stream::Flags::PGM << PSTR("Cell voltages (") <<
     bq.getNumberOfConnectedCells() << stream::Flags::PGM <<
     PSTR(" / ") << numCells << stream::Flags::PGM << PSTR("):") << EOL;
@@ -335,140 +421,16 @@ void Console::debug_print() {
     cout << stream::Flags::PGM << PSTR(" | Avg: ") << bq.getAvgCellVoltage();
     cout << stream::Flags::PGM << PSTR(" | Max: ") << bq.getMaxCellVoltage();
     cout << stream::Flags::PGM << PSTR(" | Delta: ") << bq.getMaxCellVoltage() - bq.getMinCellVoltage();
-//     cout << stream::Flags::PGM << PSTR("\r\n\r\n         maxVoltage: ") << packet.max_voltage;
-//     cout << stream::Flags::PGM << PSTR("\r\nmaxDischargeCurrent: ") << packet.max_discharge_current;
-//     cout << stream::Flags::PGM << PSTR("\r\n   maxChargeCurrent: ") << packet.max_charge_current;
-    cout << stream::Flags::PGM << PSTR("\r\n\r\nXREADY errors: ") << bq.errorCounter_[bq.ERROR_XREADY];
-    cout << stream::Flags::PGM << PSTR("\r\n ALERT errors: ") << bq.errorCounter_[bq.ERROR_ALERT];
-    cout << stream::Flags::PGM << PSTR("\r\n   UVP errors: ") << bq.errorCounter_[bq.ERROR_UVP];
-    cout << stream::Flags::PGM << PSTR("\r\n   OVP errors: ") << bq.errorCounter_[bq.ERROR_OVP];
-    cout << stream::Flags::PGM << PSTR("\r\n   SCD errors: ") << bq.errorCounter_[bq.ERROR_SCD];
-    cout << stream::Flags::PGM << PSTR("\r\n   OCD errors: ") << bq.errorCounter_[bq.ERROR_OCD];
-    cout << stream::Flags::PGM << PSTR("\r\n\r\nDISCHG TEMP errors: ") << bq.errorCounter_[bq.ERROR_USER_DISCHG_TEMP];
-    cout << stream::Flags::PGM << PSTR("\r\n   CHG TEMP errors: ") << bq.errorCounter_[bq.ERROR_USER_CHG_TEMP];
-    cout << stream::Flags::PGM << PSTR("\r\n    CHG OCD errors: ") << bq.errorCounter_[bq.ERROR_USER_CHG_OCD] << EOL;
+    cout << stream::Flags::PGM << PSTR("\r\n\r\nXREADY errors: ") << bq.errorCounter_[devices::BQ769xERR::ERROR_XREADY];
+    cout << stream::Flags::PGM << PSTR("\r\n ALERT errors: ") << bq.errorCounter_[devices::BQ769xERR::ERROR_ALERT];
+    cout << stream::Flags::PGM << PSTR("\r\n   UVP errors: ") << bq.errorCounter_[devices::BQ769xERR::ERROR_UVP];
+    cout << stream::Flags::PGM << PSTR("\r\n   OVP errors: ") << bq.errorCounter_[devices::BQ769xERR::ERROR_OVP];
+    cout << stream::Flags::PGM << PSTR("\r\n   SCD errors: ") << bq.errorCounter_[devices::BQ769xERR::ERROR_SCD];
+    cout << stream::Flags::PGM << PSTR("\r\n   OCD errors: ") << bq.errorCounter_[devices::BQ769xERR::ERROR_OCD];
+    cout << stream::Flags::PGM << PSTR("\r\n\r\nDISCHG TEMP errors: ") << bq.errorCounter_[devices::BQ769xERR::ERROR_USER_DISCHG_TEMP];
+    cout << stream::Flags::PGM << PSTR("\r\n   CHG TEMP errors: ") << bq.errorCounter_[devices::BQ769xERR::ERROR_USER_CHG_TEMP];
+    cout << stream::Flags::PGM << PSTR("\r\n    CHG OCD errors: ") << bq.errorCounter_[devices::BQ769xERR::ERROR_USER_CHG_OCD] << EOL;
 }
-
-
-void Console::applySettings() {
-    bq.setBatteryCapacity(
-        m_Settings.capacity,
-        m_Settings.nominal_voltage,
-        m_Settings.full_voltage
-    );
-    
-    bq.setShuntResistorValue(m_Settings.shuntResistor_uOhm);
-    bq.setThermistorBetaValue(m_Settings.thermistor_BetaK);
-    bq.setTemperatureLimits(
-        m_Settings.temp_minDischargeC,
-        m_Settings.temp_maxDischargeC,
-        m_Settings.temp_minChargeC,
-        m_Settings.temp_maxChargeC
-    );
-    bq.setShortCircuitProtection(m_Settings.SCD_current, m_Settings.SCD_delay);
-    bq.setOvercurrentChargeProtection(m_Settings.OCD_current, m_Settings.OCD_delay);
-    bq.setOvercurrentDischargeProtection(m_Settings.ODP_current, m_Settings.ODP_delay);
-    bq.setCellUndervoltageProtection(m_Settings.UVP_voltage, m_Settings.UVP_delay);
-    bq.setCellOvervoltageProtection(m_Settings.OVP_voltage, m_Settings.OVP_delay);    
-    bq.setBalancingThresholds(
-        m_Settings.balance_minIdleTime,
-        m_Settings.balance_minVoltage,
-        m_Settings.balance_maxVoltageDiff
-    );
-    bq.setIdleCurrentThreshold(m_Settings.idle_currentThres);
-     
-    bq.setAutoBalancing((bool)m_Settings.balance_enabled);
-    
-    bq.setBalanceCharging(true);
-    
-    bq.adjADCPackOffset(m_Settings.adcPackOffset);
-    bq.adjADCCellsOffset(m_Settings.adcCellsOffset);
-    
-//     strncpy(packet.serial, m_Settings.serial, sizeof(packet.serial));
-//     packet.design_capacity = m_Settings.capacity;
-//     packet.real_capacity = m_Settings.capacity;
-//     packet.nominal_voltage = m_Settings.nominal_voltage;
-//     packet.date = m_Settings.date;
-//     packet.num_cycles = m_Settings.num_cycles;
-//     packet.num_charged = m_Settings.num_charged;
-}
-
-BMSSettings EEMEM bmset_eep;
-
-void Console::loadSettings() {
-//     eeprom_read_block(&m_Settings, &bmset_eep, sizeof(m_Settings));
-//     if ((HeaderEEM0 != m_Settings.header[0]) || (HeaderEEM1 != m_Settings.header[1])) {
-        loadSettingsDefault();
-//         saveSettings();
-//     }
-}
-
-void Console::saveSettings() {
-//     eeprom_write_block(&m_Settings, &bmset_eep, sizeof(m_Settings));
-}
-
-void Console::loadSettingsDefault() {
-//     m_Settings.header[0] = HeaderEEM0;
-//     m_Settings.header[1] = HeaderEEM1;
-    m_Settings.version = 1;
-    m_Settings.serial[0] = 'L';
-    m_Settings.serial[1] = 'a'; 
-    m_Settings.serial[2] = 'n';
-    m_Settings.serial[3] = 't';
-    m_Settings.serial[4] = 'h';
-    m_Settings.serial[5] = 'i';
-    m_Settings.serial[6] = ' ';
-    m_Settings.serial[7] = '1';
-    m_Settings.serial[8] = '2';
-    m_Settings.serial[9] = 's';
-    m_Settings.serial[10] = '5';
-    m_Settings.serial[11] = 'p';
-    m_Settings.serial[12] = '\0';
-    m_Settings.capacity = 13800; // mAh Put here your real milliamps if you have an amp tester look at your real battery at the output
-    m_Settings.nominal_voltage = 3600; // mV
-    m_Settings.full_voltage = 4175; // mV
-    m_Settings.num_cycles = 0;
-    m_Settings.num_charged = 0;
-    m_Settings.date = (20 << 9) | (11 << 5) | 10; // MSB (7 bits year, 4 bits month, 5 bits day) LSB
-    // setShuntResistorValue
-    m_Settings.shuntResistor_uOhm = 1000;
-    // setThermistorBetaValue
-    m_Settings.thermistor_BetaK = 3435;
-    // setTemperatureLimits
-    m_Settings.temp_minDischargeC = -20; // °C
-    m_Settings.temp_maxDischargeC = 60; // °C
-    m_Settings.temp_minChargeC = 0; // °C
-    m_Settings.temp_maxChargeC = 45; // °C
-    // setShortCircuitProtection
-    m_Settings.SCD_current = 80000; // mA
-    m_Settings.SCD_delay = 200; // us
-    // setOvercurrentChargeProtection
-    m_Settings.OCD_current = 5000; // mA
-    m_Settings.OCD_delay = 3000; // ms
-    // setOvercurrentDischargeProtection
-    m_Settings.ODP_current = 35000; // mA
-    m_Settings.ODP_delay = 1280; // ms
-    // setCellUndervoltageProtection
-    m_Settings.UVP_voltage = 2800; // mV
-    m_Settings.UVP_delay = 2; // s
-    // setCellOvervoltageProtection
-    m_Settings.OVP_voltage = 4200; // mV
-    m_Settings.OVP_delay = 2; // s
-    // setBalancingThresholds
-    m_Settings.balance_minIdleTime = 1800; // s
-    m_Settings.balance_minVoltage = 3600; // mV
-    m_Settings.balance_maxVoltageDiff = 10; // mV
-    // setIdleCurrentThreshold
-    m_Settings.idle_currentThres = 500; // mA
-    // enableAutoBalancing
-    m_Settings.balance_enabled = 1;
-    // adjADCPackOffset
-    m_Settings.adcPackOffset = 0;
-    // adjADCCellsOffset
-    memset(m_Settings.adcCellsOffset, 0, sizeof(m_Settings.adcCellsOffset));
-    
-}
-
 
 
 }
