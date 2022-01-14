@@ -25,7 +25,6 @@
 #define IC_BQ76940
 
 #ifdef IC_BQ76920
-#define NUMBER_OF_CELLS             5
 #define MAX_NUMBER_OF_CELLS         5
 #define MAX_NUMBER_OF_THERMISTORS   1
 #define BQ769X0_I2C_ADDR            0x08
@@ -34,7 +33,6 @@
 #endif
 
 #ifdef IC_BQ76930
-#define NUMBER_OF_CELLS             10
 #define MAX_NUMBER_OF_CELLS         10
 #define MAX_NUMBER_OF_THERMISTORS   2
 #define BQ769X0_I2C_ADDR            0x08
@@ -43,7 +41,6 @@
 #endif
 
 #ifdef IC_BQ76940
-#define NUMBER_OF_CELLS             15
 #define MAX_NUMBER_OF_CELLS         15
 #define MAX_NUMBER_OF_THERMISTORS   3
 #define BQ769X0_I2C_ADDR            0x08
@@ -74,8 +71,8 @@ enum BQ769xERR {
 
 typedef struct __attribute__((packed)) {
     bool        BQ_dbg;                 // false
-    bool        chargingEnabled_;       // false
-    bool        dischargingEnabled_;    // false
+    bool        Allow_Charging;         // false
+    bool        Allow_Discharging;      // false
     int32_t     Batt_CapaNom_mAsec;     // *3600 mAs, nominal capacity of battery pack, max. 580 Ah possible @ 3.7V
     uint16_t    Cell_CapaNom_mV;        // 3600 mV, nominal voltage of single cell in battery pack
     uint16_t    Cell_CapaFull_mV;       // 4200 mV, full voltage of single cell in battery pack
@@ -106,7 +103,7 @@ typedef struct __attribute__((packed)) {
     uint32_t    CurrentThresholdIdle_mA;// 30 mA
     uint8_t     BalancingCellMaxDifference_mV;          // 20 mV
     int16_t     adcCellsOffset_[MAX_NUMBER_OF_CELLS];   // 0 mV
-    uint16_t    RT_Beta[MAX_NUMBER_OF_THERMISTORS];     // 3435 typical value for Semitec 103AT-5 thermistor: 3435  
+    uint16_t    RT_Beta[MAX_NUMBER_OF_THERMISTORS];     // 3435 typical value for Semitec 103AT-5 thermistor: 3435
     uint32_t    ts;
     uint8_t     crc8;
 } bq769_conf;
@@ -122,11 +119,15 @@ typedef struct __attribute__((packed)) {
     uint16_t    batVoltage_raw_;        // 0, adc val
     int32_t     batCurrent_;            // 0, mA
     int16_t     batCurrent_raw_;        // adc val
+    uint32_t    balancingStatus_;       // 0 holds on/off status of balancing switches
+    uint16_t    cellVoltages_raw_[MAX_NUMBER_OF_CELLS];     //null, adc val
+} bq769_data;
+
+typedef struct __attribute__((packed)) {
     uint16_t    adcGain_;               // 0 uV/LSB
     int8_t      adcOffset_;             // 0 mV
-    uint32_t    balancingStatus_;       // 0 holds on/off status of balancing switches
-    uint8_t     batCycles_;
-    uint8_t     chargedTimes_;
+    uint16_t    batCycles_;
+    uint16_t    chargedTimes_;
     uint8_t     idCellMaxVoltage_;
     uint8_t     idCellMinVoltage_;
     uint32_t    idleTimestamp_;
@@ -134,21 +135,28 @@ typedef struct __attribute__((packed)) {
     uint8_t     errorCounter_[NUM_ERRORS];
     uint8_t     cellIdMap_[MAX_NUMBER_OF_CELLS];            // null, logical cell id -> physical cell id
     uint16_t    cellVoltages_[MAX_NUMBER_OF_CELLS];         //null, mV
-    uint16_t    cellVoltages_raw_[MAX_NUMBER_OF_CELLS];     //null, adc val
     int16_t     temperatures_[MAX_NUMBER_OF_THERMISTORS];   // null, C/10
     uint32_t    errorTimestamps_[NUM_ERRORS];               // null
     uint32_t    ts;
     uint8_t     crc8;
-} bq769_data;
+} bq769_stats;
+
+
+
+
+
+
+
+
 
 class bq769x0 {
     stream::UartStream  cout;
     bq769_conf          &conf;
     bq769_data          &data;
-    
+    bq769_stats         &stats;
     uint8_t             i2buf[4];
 public:
-    bq769x0(bq769_conf &_conf, bq769_data &_data);
+    bq769x0(bq769_conf &_conf, bq769_data &_data, bq769_stats &_stats);
     void begin();
     uint8_t checkStatus();  // returns 0 if everything is OK
     void checkUser();
@@ -183,15 +191,12 @@ public:
     float getSOC(void);
     void printRegisters(void);
 private:
+    bool mChargingEnabled;
+    bool mDischargingEnabled;
     uint16_t *OCV_; // Open Circuit Voltage of cell for SOC 100%, 95%, ..., 5%, 0%
-    
-
-    
-
     uint8_t fullVoltageCount_;
     uint32_t user_CHGOCD_TriggerTimestamp_;
     uint32_t user_CHGOCD_ReleaseTimestamp_;
-    
     int32_t coulombCounter_; // mAs (= milli Coulombs) for current integration
     int32_t coulombCounter2_; // mAs (= milli Coulombs) for tracking battery cycles
     regSYS_STAT_t errorStatus_;

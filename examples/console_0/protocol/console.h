@@ -16,6 +16,8 @@ namespace protocol {
 
     
 enum PrintParam {
+    Conf_Allow_Charging,
+    Conf_Allow_Discharging,
     Conf_BQ_dbg,
     Conf_RT_bits,
     Conf_RS_uOhm,
@@ -46,7 +48,7 @@ enum PrintParam {
     Conf_adcCellsOffset,
     Conf_ts,
     Conf_CRC8,
-    FIRST = Conf_BQ_dbg,
+    FIRST = Conf_Allow_Charging,
     LAST = Conf_CRC8
 };
     
@@ -64,9 +66,10 @@ struct SerialCommand { const char *command; SerialCommandHandler handler; };
 class Console {
     mcu::Usart &ser;
     stream::UartStream cout;
-    devices::bq769_conf bq769x_conf;
-    devices::bq769_data bq76940_data;
-    devices::bq769x0    bq;
+    devices::bq769_conf  bq769x_conf;
+    devices::bq769_data  bq769x_data;
+    devices::bq769_stats bq769x_stats;
+    devices::bq769x0     bq;
     bool debug_events;
     bool handle_result;
     uint8_t param_len;
@@ -75,7 +78,8 @@ class Console {
     uint32_t m_oldMillis = 0;
     uint32_t m_millisOverflows;
     uint8_t len;
-
+    uint16_t m_BatCycles_prev;
+    uint16_t m_ChargedTimes_prev;
 public:
     Console();
     bool update(mcu::Pin job, const bool force);
@@ -83,27 +87,34 @@ public:
     bool Recv();
 private:
     void debug_print();
-    void conf_load();
+    void conf_begin_protect();
     void conf_default();
+    void conf_load();
     void conf_save();
-
+    void stats_load();
+    void stats_save();
+    void print_all_stats();
+    
     
     void print_conf(const PrintParam c);
     void print_all_conf();
     
-    void command_apply();
     void command_restore();
     void command_save();
     void command_print();
     void command_bqregs();
-    void command_wdtest();
+    void command_wdreset();
     void command_bootloader();
     void command_freemem();
     void command_format_EEMEM();
     void command_help();
     void command_shutdown();
     
-
+    void cmd_conf_print();
+    void cmd_stats_print();
+    void cmd_stats_save();
+    void cmd_Allow_Charging();
+    void cmd_Allow_Discharging();
     void cmd_BQ_dbg();
     void cmd_RT_bits();
     void cmd_RS_uOhm();
@@ -135,7 +146,6 @@ private:
     bool handleCommand(const char *buffer, const uint8_t len);
     void write_help(stream::OutputStream &out, const char *cmd, const char *help);
     char buffer[CONSOLE_BUFFER];
-    void postconf_fix();
     void compare_cmd(const char *name_P, SerialCommandHandler handler);
     enum SerialState { CONSOLE_STARTUP, CONSOLE_ACCUMULATING, CONSOLE_COMMAND };
     SerialState state;
