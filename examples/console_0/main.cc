@@ -73,10 +73,12 @@ int main() {
     mcu::Watchdog::enable(WDTO_4S);
     proto.begin();
     uint32_t last_Activity = 0;
+    uint32_t rrr = 1;
     while (1) {
         if (ser.isActivity() || proto.update(led, isrWU) || proto.Recv()) {
             last_Activity = mcu::Timer::millis();
-        }
+        } else rrr++;
+        
         isrWU = false;
         if((uint32_t)(mcu::Timer::millis() - last_Activity) >= 200000) {
             ser.disable_TXRx();
@@ -109,7 +111,9 @@ int main() {
             timer2ovf = 0;
             if(isrRX) last_Activity = mcu::Timer::millis();
             isrRX = false;
+            isrWU = true; // forcing CC
         }
+        if (rrr == 0x7FFFF) { isrWU = true; rrr = 0; } // forcing CC
         mcu::Watchdog::reset();
     }
 }

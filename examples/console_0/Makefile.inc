@@ -23,6 +23,7 @@ DUDEFLAGS = -V -p $(BUILD_MCU) $(PORT) -c $(UPLOAD_PROTOCOL) -b $(UPLOAD_SPEED)
 #FUSES = -U lfuse:w:0xFF:m -U hfuse:w:0xD6:m -U efuse:w:0x05:m
 FUSES  = -U lfuse:w:0xFF:m -U hfuse:w:0xDF:m -U efuse:w:0xFD:m
 
+# https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html
 
 SIZEFLAGS = 
 
